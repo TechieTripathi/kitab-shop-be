@@ -1,0 +1,45 @@
+{
+  "name": "intership",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "node --test",
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "migrate:products": "node scripts/migrate-products-collection.js",
+    "migrate:images": "node scripts/migrate-images-to-local.js",
+    "assets:static": "node scripts/fetch-static-images.js",
+    "admin:upsert": "node scripts/upsert-admin-user.js",
+    "db:backup": "bash scripts/backup-db.sh",
+    "db:restore": "bash scripts/restore-db.sh"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "bcrypt": "^6.0.0",
+    "compression": "^1.8.1",
+    "cors": "^2.8.6",
+    "crypto": "^1.0.1",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "geoip-lite": "^2.0.3",
+    "helmet": "^8.3.0",
+    "jsonwebtoken": "^9.0.3",
+    "mongoose": "^9.7.2",
+    "multer": "^2.2.0",
+    "nodemailer": "^9.0.1",
+    "nodemon": "^3.1.14",
+    "razorpay": "^2.9.6",
+    "redis": "^5.12.1",
+    "resend": "^6.17.1",
+    "sharp": "^0.35.2",
+    "ua-parser-js": "^2.0.10",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0"
+  }
+}

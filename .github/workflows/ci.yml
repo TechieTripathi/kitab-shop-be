@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Catches the class of breakage that module moves keep causing: a file
+      # that parses standalone but imports a path that no longer exists is not
+      # covered by the unit tests, because nothing imports it.
+      - name: Syntax check every source file
+        run: find src scripts test -name '*.js' -print0 | xargs -0 -n1 node --check
+
+      - name: Unit tests
+        run: npm test
+
+      # Fails the build on a new high/critical advisory. Moderate and below are
+      # reported but do not block, so a transitive dev-dependency notice cannot
+      # stop a release.
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
+
+  startup:
+    runs-on: ubuntu-latest
+    needs: verify
+
+    services:
+      mongodb:
+        image: mongo:7
+        ports:
+          - 27017:27017
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      # Boots the app against a throwaway Mongo so a broken import chain or a
+      # bad middleware registration fails here instead of on deploy.
+      - name: Boot the server
+        env:
+          port: '3000'
+          mango_url: mongodb://127.0.0.1:27017/kitab-shop-ci
+          SECRET_KEY: ci-secret-key-not-used-outside-ci
+          acess_token: ci-access-token-secret
+          refresh_token: ci-refresh-token-secret
+          RATE_LIMIT_STORE: memory
+        run: |
+          npm start &
+          SERVER_PID=$!
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://localhost:3000/api/v1/auth/ >/dev/null 2>&1; then
+              echo "Server responded on attempt $attempt"
+              kill $SERVER_PID
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Server did not become ready in 30s"
+          kill $SERVER_PID 2>/dev/null || true
+          exit 1
