@@ -30,7 +30,7 @@ export const revokeToken = async ({
         reason,
       },
     },
-    { upsert: true, new: true },
+    { upsert: true, returnDocument: "after" },
   );
 };
 

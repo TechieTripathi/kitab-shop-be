@@ -24,7 +24,7 @@ export const getRazorpay = () => {
   return { razorpay: razorpayInstance, keyId, keySecret };
 };
 
-export const createRazorpayReceipt = (prefix = "astro") =>
+export const createRazorpayReceipt = (prefix = "kitab") =>
   `${prefix}_${Date.now()}_${crypto.randomBytes(3).toString("hex")}`;
 
 export const isValidSignature = ({
@@ -64,16 +64,12 @@ export const getRazorpayErrorMessage = (error) =>
   error?.message ||
   "Razorpay request failed";
 
-export const refundCapturedPayment = async ({ razorpay, paymentId, amount }) => {
-  try {
-    await razorpay.payments.refund(paymentId, {
-      amount,
-      speed: "normal",
-      notes: { reason: "Local order could not be completed" },
-    });
-    return true;
-  } catch (error) {
-    console.error("Razorpay automatic refund failed:", getRazorpayErrorMessage(error));
-    return false;
-  }
-};
+/**
+ * Removed in favour of `refundOrphanedCapture` in orphaned-capture.service.js.
+ *
+ * This helper refunded a captured payment but recorded NOTHING, so a refund that
+ * then failed left no trace of the liability — and only the browser-verify path
+ * ever called it, which is why the webhook path had no compensation at all. The
+ * replacement records the orphaned capture first, is idempotent on the payment
+ * id, and tags the gateway call for reconciliation.
+ */

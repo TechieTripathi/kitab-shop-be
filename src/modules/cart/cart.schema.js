@@ -1,6 +1,10 @@
 import { looseBody, objectId, z } from "../../middleware/validate.middleware.js";
 
-const MAX_QUANTITY_PER_LINE = 100;
+// A sanity ceiling against fat-finger/bot quantities — not a stock check.
+// The real, per-product limit is each item's actual stock, enforced in
+// cart.controller.js (addItemsToCart / updateQuantity) against live
+// Product.stock, since that's the only place that can know it.
+const MAX_QUANTITY_PER_LINE = 999;
 const MAX_BULK_ITEMS = 100;
 
 const quantity = z.coerce

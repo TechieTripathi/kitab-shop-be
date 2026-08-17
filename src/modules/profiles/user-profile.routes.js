@@ -7,6 +7,11 @@ import {
   SingleFieldProfileUpdate,
   UpdateProfile,
   GetReferralStats,
+  GetAddresses,
+  AddAddress,
+  UpdateAddress,
+  DeleteAddress,
+  SetDefaultAddress,
 } from "./profile.controller.js";
 import { TokenVerify } from "../../middleware/auth.middleware.js";
 
@@ -42,5 +47,13 @@ routes.patch(
 );
 
 routes.get("/referral-stats", TokenVerify, GetReferralStats);
+
+//  saved address book
+
+routes.get("/addresses", TokenVerify, GetAddresses);
+routes.post("/addresses", TokenVerify, AddAddress);
+routes.put("/addresses/:addressId", TokenVerify, UpdateAddress);
+routes.delete("/addresses/:addressId", TokenVerify, DeleteAddress);
+routes.put("/addresses/:addressId/default", TokenVerify, SetDefaultAddress);
 
 export default routes;

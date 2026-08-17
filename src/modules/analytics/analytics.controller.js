@@ -26,7 +26,7 @@ export const TrackPageView = async (req, res) => {
         $setOnInsert: { name },
         $inc: { viewCount: 1 },
       },
-      { new: true, upsert: true, returnDocument: 'after' }
+      { upsert: true, returnDocument: 'after' }
     );
 
     return res.status(200).json({

@@ -27,7 +27,6 @@ export const getFeatures = () => ({
     enabled: readBool("SHIPROCKET_ENABLED", false),
     provider: readString("SHIPPING_PROVIDER", "shiprocket").toLowerCase(),
     autoCreateOrder: readBool("SHIPROCKET_AUTO_CREATE_ORDER", false),
-    adminOnly: readBool("SHIPROCKET_ADMIN_ONLY", true),
     webhookEnabled: readBool("SHIPROCKET_WEBHOOK_ENABLED", false),
   },
   inventory: {

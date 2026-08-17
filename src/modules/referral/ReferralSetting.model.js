@@ -31,13 +31,15 @@ const referralSettingSchema = new mongoose.Schema(
   }
 );
 
-// We use singletonId to ensure only one document exists.
+// upsert, not findOne-then-create: the latter races if two requests hit this
+// concurrently before the singleton exists yet (e.g. React StrictMode's
+// double-invoked mount effect), and the loser's create() throws E11000.
 referralSettingSchema.statics.getSettings = async function() {
-  let settings = await this.findOne({ singletonId: "default" });
-  if (!settings) {
-    settings = await this.create({ singletonId: "default" });
-  }
-  return settings;
+  return this.findOneAndUpdate(
+    { singletonId: "default" },
+    { $setOnInsert: { singletonId: "default" } },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
 };
 
 export default mongoose.model("ReferralSetting", referralSettingSchema);

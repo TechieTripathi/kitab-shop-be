@@ -7,7 +7,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import dns from "dns";
-dns.setServers(["8.8.8.8", "1.1.1.1"]);
+dns.setServers(["8.8.8.8", "1.1.1.1", "0.0.0.0"]);
 
 import db from "./database/mongo.db.js";
 import { router as auth } from "./modules/auth/index.js";
@@ -16,6 +16,8 @@ import { router as productRoutes } from "./modules/products/index.js";
 import { router as cartRoutes } from "./modules/cart/index.js";
 import { router as inventory } from "./modules/inventory/index.js";
 import { router as order } from "./modules/orders/index.js";
+import checkoutSettingsRoutes from "./modules/orders/checkout-settings.routes.js";
+import shiprocketSettingsRoutes from "./modules/shipping/shiprocket-settings.routes.js";
 import { router as admin } from "./modules/admin/index.js";
 import { router as coupon } from "./modules/coupons/index.js";
 import banner from "./modules/banner/banner.routes.js";
@@ -33,6 +35,7 @@ import aboutPageRoutes from "./modules/about-page/aboutPage.routes.js";
 import { router as cmsRoutes } from "./modules/cms/index.js";
 import festivalRoutes from "./modules/festival/festival.routes.js";
 import seasonRoutes from "./modules/season/season.routes.js";
+import newsletterRoutes from "./modules/newsletter/newsletter.routes.js";
 import { router as seoRoutes } from "./modules/seo/index.js";
 import { startStockReservationCleanup } from "./modules/inventory/stock-reservation-cleanup.service.js";
 import { getHttpConfig } from "./config/features.config.js";
@@ -83,9 +86,36 @@ app.use(
 		},
 	})
 );
+// CORS_ALLOWED_ORIGINS is a comma-separated allowlist. When it is set, ONLY those
+// origins are permitted; when it is empty the previous reflect-any-origin behaviour
+// is kept so local and LAN development keeps working untouched.
+//
+// This has to be honoured here and not merely reported: the admin System Health
+// panel reads the same variable, so leaving the middleware permissive while the
+// panel read the variable would have shown a green "CORS restricted" tick over a
+// server that still accepted every origin — worse than no check at all.
+//
+// It matters because `credentials: true` is set: with a reflected origin, any
+// website a logged-in customer visits can call this API as them.
+const corsAllowedOrigins = String(process.env.CORS_ALLOWED_ORIGINS || "")
+	.split(",")
+	.map((value) => value.trim())
+	.filter(Boolean);
+
 app.use(
 	cros({
-		origin: (origin, callback) => callback(null, origin || true),
+		origin: (origin, callback) => {
+			// No Origin header: same-origin navigations, curl, health checks, and the
+			// payment/courier webhooks. Never a browser cross-origin request, so
+			// there is nothing to authorise.
+			if (!origin) return callback(null, true);
+			if (corsAllowedOrigins.length === 0) return callback(null, origin);
+			if (corsAllowedOrigins.includes(origin)) return callback(null, origin);
+			// Refused without throwing: an Error here becomes a 500, which reads like
+			// an outage. Omitting the header lets the browser block it and keeps the
+			// response honest.
+			return callback(null, false);
+		},
 		credentials: true,
 	})
 );
@@ -118,6 +148,14 @@ app.use(
 	}
 );
 
+app.get("/", (req, res) => {
+	res.status(200).json({
+		status: "ok",
+		service: "Kitab Shop API",
+		message: "Backend is running.",
+	});
+});
+
 app.use("/api/v1/auth", auth);
 
 app.use("/api/v1/user/profile", userProfileRoutes);
@@ -132,6 +170,8 @@ app.use("/api/v1/wishlist", wishlistRoutes);
 
 app.use("/api/v1/inventory", inventory);
 app.use("/api/v1/order", order);
+app.use("/api/v1/checkout-settings", checkoutSettingsRoutes);
+app.use("/api/v1/shipping/settings", shiprocketSettingsRoutes);
 app.use("/api/v1/coupon", coupon);
 app.use("/api/v1/banner", banner);
 app.use("/api/v1/review", review);
@@ -149,6 +189,7 @@ app.use("/api/v1/about-page", aboutPageRoutes);
 app.use("/api/v1/cms", cmsRoutes);
 app.use("/api/v1/festival", festivalRoutes);
 app.use("/api/v1/season", seasonRoutes);
+app.use("/api/v1/newsletter", newsletterRoutes);
 app.use("/api/v1/seo", seoRoutes);
 
 app.use((err, req, res, next) => {

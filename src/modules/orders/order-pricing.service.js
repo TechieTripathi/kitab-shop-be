@@ -3,7 +3,24 @@ import { isStockEnforced } from "../../config/features.config.js";
 import ProductModel from "../products/Product.model.js";
 import UserProfile from "../profiles/UserProfile.model.js";
 import { calculateCouponDiscount } from "../coupons/coupon.service.js";
-import { getVariantKey } from "../inventory/inventory-reservation.service.js";
+import CheckoutSetting from "./CheckoutSetting.model.js";
+import { getCheapestShippingRate } from "../shipping/shiprocket.service.js";
+import {
+  availableStockFor,
+  findVariant,
+  hasVariantStock,
+  normalizeSelectedVariants,
+  resolveSoleVariant,
+  variantKeyFrom,
+  variantKeyOf,
+} from "../inventory/variant.service.js";
+import {
+  INDIAN_MOBILE_REGEX,
+  INDIAN_PINCODE_REGEX,
+  INDIAN_STATES,
+} from "../../config/india-geo.config.js";
+
+const INDIAN_STATE_SET = new Set(INDIAN_STATES.map((state) => state.toLowerCase()));
 
 export const orderError = (message, statusCode = 400) => {
   const error = new Error(message);
@@ -49,11 +66,14 @@ export const prepareOrderData = async ({
   if (missingAddressFields.length > 0) {
     throw orderError(`Missing shipping fields: ${missingAddressFields.join(", ")}`);
   }
-  if (!/^[6-9][0-9]{9}$/.test(shippingAddress.phone)) {
+  if (!INDIAN_MOBILE_REGEX.test(shippingAddress.phone)) {
     throw orderError("Enter a valid 10-digit Indian mobile number");
   }
-  if (!/^[1-9][0-9]{5}$/.test(shippingAddress.pincode)) {
+  if (!INDIAN_PINCODE_REGEX.test(shippingAddress.pincode)) {
     throw orderError("Enter a valid 6-digit Indian PIN code");
+  }
+  if (!INDIAN_STATE_SET.has(shippingAddress.state.trim().toLowerCase())) {
+    throw orderError("Select a valid Indian state or union territory");
   }
 
   const orderItems = [];
@@ -62,11 +82,12 @@ export const prepareOrderData = async ({
   for (const item of items) {
     const productId = item.product || item.productId || item.id || item._id;
     const quantity = Number(item.quantity || item.qty || 1);
-    const selectedVariants =
-      item.selectedVariants && typeof item.selectedVariants === "object"
-        ? item.selectedVariants
-        : {};
-    const variantKey = item.variantKey || getVariantKey(selectedVariants);
+    // Normalised through the SAME canonical function the cart uses. Previously the
+    // cart dropped empty attribute values before keying and this path did not, so
+    // `{color:"red", size:""}` became `color:red` in the cart but `color:red|size:`
+    // on the order — two names for one line, which then defeated cart cleanup.
+    let selectedVariants = normalizeSelectedVariants(item.selectedVariants);
+    let variantKey = item.variantKey || variantKeyFrom(selectedVariants);
 
     if (!mongoose.Types.ObjectId.isValid(productId)) {
       throw orderError(
@@ -78,11 +99,53 @@ export const prepareOrderData = async ({
     }
 
     const product = await ProductModel.findById(productId).select(
-      "name image price stock",
+      "name image price stock variants",
     );
     if (!product) throw orderError("Product not found", 404);
-    if (isStockEnforced() && product.stock < quantity) {
-      throw orderError(`${product.name} has only ${product.stock} item(s) in stock`);
+
+    // The binding limit is the chosen VARIANT's stock, not the product total.
+    // product.stock is the sum across variants, so a product with 10 units split
+    // 10 Red / 0 Blue passed this check for a Blue — variants[].stock was read by
+    // nothing in any order path. availableStockFor falls back to product.stock
+    // for the (currently universal) case of a product with no variants.
+    let variant = findVariant(product, variantKey);
+    // A variant-stocked product cannot sell a line that names no (resolvable)
+    // variant: there is no honest answer to "which variant's units were sold",
+    // and the decrement would corrupt the counters (total moves, variant
+    // doesn't — the next product save then derives the total from the stale
+    // variant numbers and resurrects sold units). Checked BEFORE availability,
+    // which would otherwise pass on the product total.
+    //
+    // One honest repair first: a product with exactly one active variant has
+    // exactly one thing the line can mean — adopt it, so legacy cart lines
+    // and older clients keep working and the order records the real variant.
+    if (hasVariantStock(product) && !variant) {
+      const sole = resolveSoleVariant(product);
+      if (sole) {
+        variant = sole;
+        variantKey = variantKeyOf(sole);
+        selectedVariants = normalizeSelectedVariants(
+          sole.attributes && typeof sole.attributes.entries === "function"
+            ? Object.fromEntries(sole.attributes.entries())
+            : sole.attributes,
+        );
+      } else {
+        throw orderError(
+          `Select an option for ${product.name} — this product is stocked per variant. Please remove it from the cart and add it again with an option selected.`,
+        );
+      }
+    }
+    const available = availableStockFor(product, variantKey);
+    if (isStockEnforced() && available < quantity) {
+      throw orderError(
+        variant
+          ? `${product.name} (${variant.name}) has only ${available} item(s) in stock`
+          : `${product.name} has only ${available} item(s) in stock`,
+      );
+    }
+    // An explicitly deactivated variant is not for sale at any stock level.
+    if (variant && variant.active === false) {
+      throw orderError(`${product.name} (${variant.name}) is no longer available`);
     }
 
     const price = Number(product.price) || 0;
@@ -119,7 +182,24 @@ export const prepareOrderData = async ({
   }
 
   const discount = couponDiscount + walletDiscount;
-  const shippingCharge = 0;
+
+  // Free unless an admin has switched live rates on. Reading the setting here rather than
+  // in the controllers means both checkout paths — COD and Razorpay — price shipping
+  // identically, and the preview the customer is shown is the figure the order is created
+  // with. Falls back to free on any failure, so a courier API blip cannot block checkout.
+  const { shippingRatesEnabled } = await CheckoutSetting.getSettings();
+  let shippingCharge = 0;
+  if (shippingRatesEnabled) {
+    const rate = await getCheapestShippingRate({
+      deliveryPostcode: shippingAddress.pincode,
+      // The COD gate asks the same question a moment later; the memo inside
+      // checkServiceability means both reads are one call.
+      cod: false,
+      declaredValue: subtotal,
+    });
+    if (rate.ok) shippingCharge = rate.amount;
+  }
+
   const tax = 0;
 
   return {

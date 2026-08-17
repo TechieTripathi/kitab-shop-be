@@ -41,6 +41,9 @@ export const loginSchema = {
 export const googleLoginSchema = {
   body: looseBody({
     credential: boundedString({ label: "Google credential", max: 4000 }),
+    referralCode: boundedString({ label: "Referral code", max: 40 })
+      .optional()
+      .or(z.literal("")),
   }),
 };
 

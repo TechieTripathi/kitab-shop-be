@@ -72,11 +72,11 @@ await User.findOneAndUpdate(
 );
 
 const category = await Category.findOneAndUpdate(
-  { name: "Gemstones" },
+  { name: "Fiction" },
   {
-    name: "Gemstones",
-    tagline: "Certified natural stones",
-    themecolor: "#7C3AED",
+    name: "Fiction",
+    tagline: "Stories & Novels",
+    themecolor: "#7B2D6E",
     image: PLACEHOLDER_IMAGE,
     bestseller: true,
   },
@@ -86,24 +86,31 @@ const category = await Category.findOneAndUpdate(
 // Deliberately mixed stock levels so the admin inventory screen renders its
 // in-stock, low-stock and out-of-stock branches.
 const products = [
-  { name: "Red Coral 7ct", price: 3500, mrp: 4200, stock: 12 },
-  { name: "Blue Sapphire 5ct", price: 9500, mrp: 11000, stock: 3 },
-  { name: "Yellow Sapphire 6ct", price: 7800, mrp: 8900, stock: 0 },
+  { name: "The Test Harbour", author: "Elena Marsh", price: 399, mrp: 599, stock: 12 },
+  { name: "Midnight Proof", author: "Ravi Iyer", price: 449, mrp: 699, stock: 3 },
+  { name: "The Empty Shelf", author: "Grace Bellamy", price: 299, mrp: 499, stock: 0 },
 ];
 
 for (const item of products) {
+  const { author, ...fields } = item;
   await Product.findOneAndUpdate(
     { name: item.name },
     {
-      ...item,
-      brand: "AstroWala",
-      description: `${item.name}, lab certified and energised before dispatch.`,
-      producthightlight: "100% natural, certified",
+      ...fields,
+      brand: "Harbor & Pine Press",
+      publisher: "Harbor & Pine Press",
+      author,
+      isbn: `978-93-5432-9${String(products.indexOf(item)).padStart(2, "0")}-0`,
+      language: "English",
+      pages: 300,
+      edition: "1st Edition",
+      description: `${item.name}, a test-catalogue novel by ${author}.`,
+      producthightlight: "Test fixture, bookstore catalogue",
       category_id: category._id,
       image: PLACEHOLDER_IMAGE,
       metaTitle: `Buy ${item.name} Online`,
-      metaDescription: `Certified ${item.name} with lab report.`,
-      metaKeywords: ["gemstone", item.name.split(" ")[0].toLowerCase()],
+      metaDescription: `${item.name} by ${author}.`,
+      metaKeywords: ["book", item.name.split(" ")[0].toLowerCase()],
     },
     { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
   );

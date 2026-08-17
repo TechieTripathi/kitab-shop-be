@@ -31,6 +31,7 @@ import ReferralSetting from "../referral/ReferralSetting.model.js";
 import { isAuthSecurityEnabled } from "../../config/features.config.js";
 import {
   getPrimaryRole,
+  getUserPermissions,
   hasAdminRole,
   normalizeRoles,
 } from "../../config/admin-permissions.config.js";
@@ -63,6 +64,38 @@ const getPasswordResetTokenTtlMs = () => {
       : 15;
 
   return ttlMinutes * 60 * 1000;
+};
+
+const createReferralSignupCoupon = async ({ user, settings }) => {
+  const referralSettings = settings || await ReferralSetting.getSettings();
+  const isPercentage = referralSettings.signupDiscountType === "percentage";
+
+  await CouponModel.create({
+    targetType: "all",
+    discountType: referralSettings.signupDiscountType || "fixed",
+    discountValue: referralSettings.signupDiscountAmount,
+    startDate: new Date(),
+    expireDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+    maxLimit: 1,
+    minPurchaseAmount: isPercentage ? 0 : referralSettings.signupDiscountAmount,
+    assignedUser: user._id,
+    customerEmail: user.email,
+    isActive: true,
+  });
+};
+
+const findReferrerByCode = async (referralCode) => {
+  const requestedReferralCode = String(referralCode || "").trim().toUpperCase();
+  if (!requestedReferralCode) return null;
+
+  const referrerProfile = await UserProfile.findOne({ referralCode: requestedReferralCode });
+  if (!referrerProfile) {
+    const error = new Error("Invalid referral code");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return referrerProfile.userid;
 };
 
 const findUserByEmail = async (email) => {
@@ -120,6 +153,7 @@ const buildLoginResponse = async (req, res, user) => {
       fullName: displayName,
       role: primaryRole,
       roles,
+      permissions: hasAdminRole({ roles }) ? getUserPermissions(user) : [],
     },
     token: {
       accessToken,
@@ -218,7 +252,9 @@ export const login = async (req, res) => {
 
     if (user.isVerified === false) {
       return res.status(401).json({
-        message: "User not verified",
+        message:
+          "Please verify your email first — check your inbox for the verification link, or use 'Resend verification email' below.",
+        code: "EMAIL_NOT_VERIFIED",
       });
     }
     if (
@@ -261,6 +297,11 @@ export const GoogleLogin = async (req, res) => {
       });
     }
 
+    const isNewUser = !user;
+    const referredByForNewUser = isNewUser
+      ? await findReferrerByCode(req.body?.referralCode)
+      : null;
+
     if (!user) {
       const randomPassword = await CreateharhPassword(
         `google:${profile.googleId}:${crypto.randomBytes(24).toString("hex")}`,
@@ -281,14 +322,26 @@ export const GoogleLogin = async (req, res) => {
 
     const existingProfile = await UserProfile.findOne({ userid: user._id });
     if (!existingProfile) {
+      // Same referral attribution as the email/password signup path
+      // (CreateUser) — a referral code only means anything at first signup,
+      // so this is skipped entirely for an existing profile below.
+      const referredBy = isNewUser
+        ? referredByForNewUser
+        : await findReferrerByCode(req.body?.referralCode);
+
       await UserProfile.create({
         userid: user._id,
-        referralCode: `ASTRO-${Math.random().toString(36).substring(2, 8).toUpperCase()}`,
+        referralCode: `KITAB-${Math.random().toString(36).substring(2, 8).toUpperCase()}`,
+        referredBy,
         fullName: profile.name,
         firstName: profile.firstName,
         lastName: profile.lastName,
         avatar: profile.avatar,
       });
+
+      if (referredBy) {
+        await createReferralSignupCoupon({ user });
+      }
     } else {
       if (profile.name && !existingProfile.fullName)
         existingProfile.fullName = profile.name;
@@ -397,7 +450,7 @@ export const UpdateAdminTwoFactor = async (req, res) => {
     const user = await UserModel.findByIdAndUpdate(
       req.user.id,
       { adminTwoFactorEnabled: enabled },
-      { new: true },
+      { returnDocument: "after" },
     ).select("email adminTwoFactorEnabled");
 
     return res.status(200).json({
@@ -466,10 +519,22 @@ export const CreateUser = async (req, res) => {
     const existingUser = await CheckUser(email);
 
     if (existingUser) {
-      return res.status(400).json({
+      if (existingUser.isVerified === false) {
+        return res.status(409).json({
+          message:
+            "This account already exists but is not verified yet. Please verify your email to continue.",
+          code: "EMAIL_NOT_VERIFIED",
+        });
+      }
+
+      return res.status(409).json({
         message: "User already exists",
       });
     }
+
+    // Check referral code before creating the user. If the code is invalid, no
+    // orphan auth row should be left behind.
+    const referredBy = await findReferrerByCode(referralCode);
 
     // 3. Hash password
     const hashedPassword = await CreateharhPassword(Password);
@@ -490,23 +555,8 @@ export const CreateUser = async (req, res) => {
       });
     }
 
-    // Check referral code
-    let referredBy = null;
-    if (referralCode) {
-      const referrerProfile = await UserProfile.findOne({
-        referralCode: String(referralCode).trim().toUpperCase(),
-      });
-      if (!referrerProfile) {
-        await UserModel.deleteOne({ _id: user._id });
-        return res.status(400).json({
-          message: "Invalid referral code",
-        });
-      }
-      referredBy = referrerProfile.userid;
-    }
-
     // Create user profile with their own new referral code
-    const myReferralCode = `ASTRO-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+    const myReferralCode = `KITAB-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
     await UserProfile.create({
       userid: user._id,
       referralCode: myReferralCode,
@@ -515,38 +565,35 @@ export const CreateUser = async (req, res) => {
 
     // If referred, create a coupon for this new user based on Admin settings
     if (referredBy) {
-      const settings = await ReferralSetting.getSettings();
-      const isPercentage = settings.signupDiscountType === "percentage";
-
-      await CouponModel.create({
-        targetType: "all",
-        discountType: settings.signupDiscountType || "fixed",
-        discountValue: settings.signupDiscountAmount,
-        startDate: new Date(),
-        expireDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days
-        maxLimit: 1,
-        minPurchaseAmount: isPercentage ? 0 : settings.signupDiscountAmount,
-        assignedUser: user._id,
-        customerEmail: user.email,
-        isActive: true,
-      });
+      await createReferralSignupCoupon({ user });
     }
 
-    // 5. Create verification token/OTP and send them in one email
-    await createEmailVerification(user, email);
+    // 5. Create verification token/OTP and send them in one email. A send
+    // failure must not pretend the mail went out — the account exists but the
+    // customer needs to know to use "Resend verification" instead of waiting
+    // for an email that never comes.
+    let emailSent = true;
+    try {
+      await createEmailVerification(user, email);
+    } catch {
+      emailSent = false;
+    }
 
     // 6. Remove password from response
     const { password, ...userData } = user.toObject();
 
     // 7. Success response
     return res.status(201).json({
-      message: "User created successfully. Please verify your email.",
+      message: emailSent
+        ? "User created successfully. Please verify your email."
+        : "Account created, but the verification email could not be sent right now. Please use 'Resend verification email' from the login page in a minute.",
+      emailSent,
       user: userData,
     });
   } catch (error) {
     console.error(error);
 
-    return res.status(500).json({
+    return res.status(error.statusCode || 500).json({
       message: error.message,
     });
   }
@@ -616,7 +663,7 @@ export const EmailVerfily = async (req, res) => {
         isBlocked: false,
         blockedAt: null,
       },
-      { new: true },
+      { returnDocument: "after" },
     );
 
     if (!user) {
@@ -664,7 +711,14 @@ export const ResendVerificationEmail = async (req, res) => {
     // new one, so only the latest email can verify the account.
     await emailverificationmodel.deleteMany({ email, isUsed: false });
 
-    await createEmailVerification(user, email);
+    try {
+      await createEmailVerification(user, email);
+    } catch {
+      return res.status(502).json({
+        message:
+          "We could not send the verification email right now. Please try again in a few minutes.",
+      });
+    }
 
     return res.status(200).json({
       message: "Verification email sent. Please check your inbox.",

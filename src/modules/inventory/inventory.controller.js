@@ -1,5 +1,42 @@
 import InventoryModel from "./inventory.model.js";
+import InventorySetting from "./InventorySetting.model.js";
 import ProductModel from "../products/Product.model.js";
+import { VARIANT_MANAGED_STOCK_MESSAGE, hasVariantStock } from "./variant.service.js";
+
+export const GetInventorySettings = async (req, res) => {
+  try {
+    const settings = await InventorySetting.getSettings();
+    return res.status(200).json({
+      message: "Inventory settings fetched successfully",
+      data: { lowStockThreshold: settings.lowStockThreshold },
+    });
+  } catch (ex) {
+    return res.status(500).json({ message: ex.message });
+  }
+};
+
+export const UpdateInventorySettings = async (req, res) => {
+  try {
+    const { lowStockThreshold } = req.body;
+    const value = Number(lowStockThreshold);
+    if (!Number.isFinite(value) || value < 0) {
+      return res.status(400).json({
+        message: "Low stock threshold must be a non-negative number",
+      });
+    }
+
+    const settings = await InventorySetting.getSettings();
+    settings.lowStockThreshold = value;
+    await settings.save();
+
+    return res.status(200).json({
+      message: "Inventory settings updated successfully",
+      data: { lowStockThreshold: settings.lowStockThreshold },
+    });
+  } catch (ex) {
+    return res.status(500).json({ message: ex.message });
+  }
+};
 
 export const CreateInventory = async (req, res) => {
   try {
@@ -23,10 +60,23 @@ export const CreateInventory = async (req, res) => {
       });
     }
 
-    const product = await ProductModel.findById(product_id).select("stock");
+    const product = await ProductModel.findById(product_id).select("stock variants");
     if (!product) {
       return res.status(404).json({
         message: "Product not found",
+      });
+    }
+
+    // Same guard UpdateStock has: a variant-stocked product's total is the SUM
+    // of its variants — setting it directly desynchronises the two counters.
+    const hasTrackedVariants = (product.variants || []).some(
+      (variant) => typeof variant.stock === "number",
+    );
+    if (hasTrackedVariants) {
+      return res.status(409).json({
+        message:
+          "This product's stock is managed per variant. Edit the variant stocks on the product instead.",
+        code: "STOCK_IS_VARIANT_MANAGED",
       });
     }
 
@@ -202,10 +252,19 @@ export const UpdateStock = async (req, res) => {
       });
     }
 
-    const product = await ProductModel.findById(productId).select("stock");
+    const product = await ProductModel.findById(productId).select("stock variants");
     if (!product) {
       return res.status(404).json({
         message: "Product not found",
+      });
+    }
+
+    // Same rule as the product endpoints: a variant-stocked product's total is the
+    // sum of its variants and cannot be set directly here.
+    if (hasVariantStock(product)) {
+      return res.status(409).json({
+        message: VARIANT_MANAGED_STOCK_MESSAGE,
+        code: "STOCK_IS_VARIANT_MANAGED",
       });
     }
 

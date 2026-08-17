@@ -131,6 +131,27 @@ const userProfileSchema = new mongoose.Schema(
         trim: true,
       },
     },
+
+    // A real, server-persisted address book (unlike the single `address`
+    // field above, which is deprecated in favor of this but kept for
+    // backward compatibility with existing reads). Survives across devices,
+    // unlike the old browser-localStorage-only address list.
+    addresses: {
+      type: [
+        {
+          fullName: { type: String, trim: true, required: true },
+          phone: { type: String, trim: true, required: true },
+          addressLine1: { type: String, trim: true, required: true },
+          addressLine2: { type: String, trim: true, default: "" },
+          city: { type: String, trim: true, required: true },
+          state: { type: String, trim: true, required: true },
+          pincode: { type: String, trim: true, required: true },
+          country: { type: String, trim: true, default: "India" },
+          isDefault: { type: Boolean, default: false },
+        },
+      ],
+      default: [],
+    },
   },
   {
     timestamps: true,

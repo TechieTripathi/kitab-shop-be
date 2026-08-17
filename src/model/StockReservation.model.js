@@ -32,13 +32,19 @@ const stockReservationSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
+    // Starts EMPTY and is appended to as each product's stock is successfully
+    // deducted, so this list always describes what was actually taken.
+    //
+    // The old "must contain at least one item" validator forced the whole list to
+    // be known before the row could exist, which meant stock had to be deducted
+    // first and the row written afterwards — and a crash in between deducted units
+    // with no record anywhere, leaking them permanently (the expiry job can only
+    // release reservations it can find). An empty list is now a legitimate
+    // transient state meaning "row exists, nothing taken yet"; releasing it
+    // correctly restocks nothing.
     items: {
       type: [reservationItemSchema],
-      required: true,
-      validate: {
-        validator: (value) => value.length > 0,
-        message: "Reservation must contain at least one item.",
-      },
+      default: [],
     },
     status: {
       type: String,

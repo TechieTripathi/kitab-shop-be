@@ -6,7 +6,7 @@ const defaultFooterSettings = {
     { label: "Certified Products", icon: "shield", position: 1, enabled: true },
     { label: "Free Delivery", icon: "truck", position: 2, enabled: true },
     { label: "7 Day Returns", icon: "return", position: 3, enabled: true },
-    { label: "Verified Astrologers", icon: "verified", position: 4, enabled: true },
+    { label: "Genuine Editions", icon: "verified", position: 4, enabled: true },
   ],
   sections: [
     {
@@ -42,9 +42,9 @@ const defaultFooterSettings = {
     },
   ],
   contact: {
-    phone: "+91 63983 93497",
-    email: "adityak74920@gmail.com",
-    address: "Astro Wala Shop Commerce Pvt. Ltd.\nIDPL, Rishikesh,\nUttarakhand 249201",
+    phone: "+91 98XXX XXXXX",
+    email: "support@kitabshop.com",
+    address: "Kitab Shop Commerce Pvt. Ltd.\nIDPL, Rishikesh,\nUttarakhand 249201",
     mapUrl: "https://www.google.com/maps/search/?api=1&query=IDPL+Rishikesh+Uttarakhand",
   },
   newsletterEnabled: true,

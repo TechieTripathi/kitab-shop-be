@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import Order from "../orders/Order.model.js";
+import { EXCLUDE_AWAITING_PAYMENT } from "../orders/order-visibility.js";
 import UserAuthentication from "../../model/User.model.js";
 import UserProfile from "../profiles/UserProfile.model.js";
 import {
@@ -104,30 +105,63 @@ export const setUserActiveStatus = async ({ id, isActive, adminId }) => {
 
   const [profile, ordersCount] = await Promise.all([
     UserProfile.findOne({ userid: user._id }),
-    Order.countDocuments({ user: user._id }),
+    // Excludes abandoned prepaid checkouts — this count is shown to admins as
+    // "orders placed" on a customer's profile.
+    Order.countDocuments({ user: user._id, ...EXCLUDE_AWAITING_PAYMENT }),
   ]);
 
   return formatAdminUser({ user, profile, ordersCount });
 };
 
-export const normalizeBulkProduct = (item = {}) => ({
-  name: String(item.name || "").trim(),
-  description: String(item.description || "").trim(),
-  price: Number(item.price),
-  mrp: item.mrp === undefined || item.mrp === "" ? Number(item.price) : Number(item.mrp),
-  category_id: item.category_id || item.categoryId,
-  size: item.size || "Standard",
-  brand: String(item.brand || "").trim(),
-  stock: Number(item.stock || 0),
-  producthightlight: String(item.producthightlight || item.highlight || "").trim(),
-  image: String(item.image || "").trim(),
-  public_id: item.public_id || "",
-  bestseller: Boolean(item.bestseller),
-});
+// Bulk-import CSVs are filled in by non-technical admins who have no way to
+// look up a category's raw Mongo ObjectId, so a plain category name (matched
+// case-insensitively against categoryIdByName) is accepted alongside an id.
+export const normalizeBulkProduct = (item = {}, categoryIdByName = new Map()) => {
+  // "category" (not "category_id") is what Export Products actually emits —
+  // accepted here too so an admin who exports, edits, and re-imports a CSV
+  // doesn't have every row fail just because of the column name.
+  const rawCategory = String(item.category_id || item.categoryId || item.category || "").trim();
+  const category_id = mongoose.Types.ObjectId.isValid(rawCategory)
+    ? rawCategory
+    : categoryIdByName.get(rawCategory.toLowerCase()) || "";
+
+  return {
+    name: String(item.name || "").trim(),
+    description: String(item.description || "").trim(),
+    price: Number(item.price),
+    mrp: item.mrp === undefined || item.mrp === "" ? Number(item.price) : Number(item.mrp),
+    category_id,
+    size: item.size || "Standard",
+    brand: String(item.brand || "").trim() || String(item.publisher || "").trim(),
+    stock: Number(item.stock || 0),
+    producthightlight: String(item.producthightlight || item.highlight || "").trim(),
+    image: String(item.image || "").trim(),
+    public_id: item.public_id || "",
+    bestseller: Boolean(item.bestseller),
+    // Book columns — all optional; the Product model mirrors publisher into
+    // brand when brand is blank, and normalization here keeps that possible
+    // by defaulting brand from publisher for CSV rows too.
+    author: String(item.author || "").trim(),
+    publisher: String(item.publisher || "").trim(),
+    isbn: String(item.isbn || "").trim(),
+    language: String(item.language || "").trim() || "English",
+    pages: Math.max(0, Number(item.pages) || 0),
+    edition: String(item.edition || "").trim(),
+    publicationYear:
+      item.publicationYear === undefined || item.publicationYear === "" || !Number.isFinite(Number(item.publicationYear))
+        ? null
+        : Number(item.publicationYear),
+  };
+};
 
 export const dateRange = (query = {}) => {
   const from = query.from ? new Date(query.from) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
   const to = query.to ? new Date(query.to) : new Date();
+  // A bare "YYYY-MM-DD" (what <input type="date"> sends) parses as UTC
+  // midnight, which is already several hours into the day in IST — without
+  // this, orders placed early that morning fall outside the range on both
+  // ends.
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(query.from || ""))) from.setHours(0, 0, 0, 0);
   if (/^\d{4}-\d{2}-\d{2}$/.test(String(query.to || ""))) to.setHours(23, 59, 59, 999);
   return { from, to };
 };

@@ -102,7 +102,7 @@ export const CloseLoginActivity = async (userId, activityId) => {
   return LoginActivity.findOneAndUpdate(
     { _id: activityId, userId, isActive: true },
     { $set: { isActive: false, logoutAt: new Date() } },
-    { new: true },
+    { returnDocument: "after" },
   );
 };
 

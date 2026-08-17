@@ -209,6 +209,25 @@ const buildCouponPayload = async (body = {}, existing = {}) => {
   if (merged.expireDate < merged.startDate) {
     throw couponError("Expire date must be after start date");
   }
+  // An expiry already in the past makes a coupon that can never be redeemed: GetAvailableCoupons
+  // and the redemption path both require startDate <= now <= expireDate, so it saves cleanly,
+  // appears in the admin list, and silently fails for every customer who types it.
+  //
+  // Checked only when THIS request sets the expiry (`payload`, not `merged`), so an existing
+  // coupon that has already lapsed stays editable — otherwise you could not correct anything
+  // about an expired coupon without first extending it.
+  //
+  // The START date is deliberately NOT checked against now. `parseDate` gives a date-only
+  // expiry 23:59:59 of that day, so "today" is still in the future — but it gives the start
+  // 00:00, so "today" is already in the past. Refusing a past start would therefore reject the
+  // single most common entry, and backdating a start is legitimate anyway: it just means the
+  // coupon is live immediately.
+  if (payload.expireDate !== undefined && merged.expireDate < new Date()) {
+    throw couponError(
+      "Expire date cannot be in the past — the coupon could never be redeemed. " +
+        "To end a coupon early, switch it off with the Active toggle instead.",
+    );
+  }
   if (!["percentage", "fixed"].includes(merged.discountType)) {
     throw couponError("Discount type must be percentage or fixed");
   }

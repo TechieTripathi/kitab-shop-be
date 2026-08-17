@@ -59,11 +59,23 @@ if [[ -z "${MONGO_URL:-}" ]]; then
     echo "error: no MONGO_URL set and ${APP_DIR}/.env not found" >&2
     exit 1
   fi
-  MONGO_URL="$(
-    grep -E '^[[:space:]]*mango_url[[:space:]]*=' "${APP_DIR}/.env" \
-      | tail -n 1 \
-      | sed -E 's/^[[:space:]]*mango_url[[:space:]]*=[[:space:]]*//; s/^["'"'"']//; s/["'"'"']$//'
-  )"
+  # Both spellings, in the app's own precedence (src/database/mongo.db.js reads
+  # `mango_url || mongo_url`). Reading only `mango_url` meant that on a deployment whose
+  # .env says `mongo_url` this captured an empty string and exited 1 with no output — so a
+  # restore appeared to do nothing rather than say why.
+  for KEY in mango_url mongo_url MONGO_URL; do
+    # `|| true` is load-bearing: with `set -o pipefail`, grep exiting 1 because a key is
+    # ABSENT fails the whole command substitution, and `set -e` then kills the script — no
+    # message, no archive, exit 1. That is exactly how this silently never backed anything
+    # up. A missing key has to be an empty result, not a fatal error, because trying the
+    # next spelling is the entire point of the loop.
+    MONGO_URL="$(
+      { grep -E "^[[:space:]]*${KEY}[[:space:]]*=" "${APP_DIR}/.env" || true; } \
+        | tail -n 1 \
+        | sed -E "s/^[[:space:]]*${KEY}[[:space:]]*=[[:space:]]*//; s/^[\"']//; s/[\"']$//"
+    )"
+    [[ -n "${MONGO_URL}" ]] && break
+  done
 fi
 
 if [[ -z "${MONGO_URL}" ]]; then

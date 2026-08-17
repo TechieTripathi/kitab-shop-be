@@ -15,6 +15,33 @@ const normalizePosition = (value) => {
   return Number.isNaN(position) ? 0 : position;
 };
 
+const defaultPolicies = [
+  {
+    title: "Terms of Use",
+    slug: "terms",
+    heading: "Terms of Use",
+    content:
+      "The basic terms that govern your use of Kitab Shop.\n\nUsing our platform\n\nBy using Kitab Shop, you agree to provide accurate information at checkout and to use our books and digital editions for personal, lawful purposes only.\n\nProduct descriptions\n\nWe do our best to keep cover images, page counts and edition details accurate, but publishers occasionally revise covers and reprints - the ISBN on the product page is always the authoritative identifier.",
+    position: 1,
+  },
+  {
+    title: "Privacy Policy",
+    slug: "privacy",
+    heading: "Privacy Policy",
+    content:
+      "How we handle the information you share with us.\n\nWhat we collect\n\nYour name, contact details and delivery address are used only to fulfil your order, and your reading preferences only to improve recommendations - never sold to third parties.",
+    position: 2,
+  },
+  {
+    title: "Refund Policy",
+    slug: "refund",
+    heading: "Refund Policy",
+    content:
+      "How refunds work once a return or cancellation is approved.\n\nRefund timelines\n\nApproved refunds are credited to your original payment method within 5-7 business days.\n\nCash on Delivery orders\n\nFor COD orders, refunds are processed via UPI or bank transfer. You will be asked for these details once your return is approved.",
+    position: 3,
+  },
+];
+
 const normalizeStyles = (styles = {}) => {
   const validFontFamilies = ["default", "serif", "sans", "mono"];
   const validWeights = ["normal", "medium", "semibold", "bold"];
@@ -104,6 +131,16 @@ const sendServerError = (res, error) =>
     message: error.message,
   });
 
+const ensureDefaultPolicies = async () => {
+  for (const policy of defaultPolicies) {
+    await Policy.findOneAndUpdate(
+      { slug: policy.slug },
+      { $setOnInsert: { ...policy, styles: normalizeStyles({}) } },
+      { upsert: true, setDefaultsOnInsert: true },
+    );
+  }
+};
+
 // POST /api/v1/policy/create
 export const CreatePolicy = async (req, res) => {
   try {
@@ -159,6 +196,7 @@ export const CreatePolicy = async (req, res) => {
 // GET /api/v1/policy/all-policies
 export const GetAllPolicies = async (req, res) => {
   try {
+    await ensureDefaultPolicies();
     const policies = await Policy.find().sort({ position: 1, createdAt: -1 });
 
     return res.status(200).json({
@@ -174,7 +212,9 @@ export const GetAllPolicies = async (req, res) => {
 // GET /api/v1/policy/:slug
 export const GetPolicyBySlug = async (req, res) => {
   try {
-    const policy = await Policy.findOne({ slug: normalizeSlug(req.params.slug) });
+    const slug = normalizeSlug(req.params.slug);
+    await ensureDefaultPolicies();
+    const policy = await Policy.findOne({ slug });
 
     if (!policy) {
       return res.status(404).json({

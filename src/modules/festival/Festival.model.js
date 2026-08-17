@@ -43,6 +43,21 @@ const FestivalSchema = new mongoose.Schema(
       default: 7,
       min: 0,
     },
+    banner: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+    emoji: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+    gradient: {
+      type: String,
+      trim: true,
+      default: "",
+    },
     active: {
       type: Boolean,
       default: true,

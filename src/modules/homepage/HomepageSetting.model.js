@@ -13,6 +13,18 @@ const homepageSettingSchema = new mongoose.Schema(
       ref: "Category",
       default: null,
     },
+    categoryOrder: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Category",
+      },
+    ],
+    featuredReviews: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Review",
+      },
+    ],
     backgroundColor: {
       type: String,
       default: "#ffffff",

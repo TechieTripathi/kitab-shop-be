@@ -34,9 +34,15 @@ export const isAdmin = async (req, res, next) => {
       });
     }
 
-    const user = await UserModel.findById(decoded.id).select("roles isActive");
+    // isBlocked is checked here as well as isActive. TokenVerify (the customer
+    // path) already rejected blocked accounts, but this middleware did not even
+    // select the field — so blocking a compromised or departed admin left their
+    // existing token fully valid on every admin route until it expired.
+    const user = await UserModel.findById(decoded.id).select(
+      "roles isActive isBlocked",
+    );
 
-    if (!user || !hasAdminRole(user) || user.isActive === false) {
+    if (!user || !hasAdminRole(user) || user.isActive === false || user.isBlocked) {
       return res.status(403).json({
         message: "Admin access denied",
       });

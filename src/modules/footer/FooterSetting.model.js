@@ -90,17 +90,17 @@ const FooterSettingSchema = new mongoose.Schema(
     contact: {
       phone: {
         type: String,
-        default: "+91 63983 93497",
+        default: "+91 98XXX XXXXX",
         trim: true,
       },
       email: {
         type: String,
-        default: "adityak74920@gmail.com",
+        default: "support@kitabshop.com",
         trim: true,
       },
       address: {
         type: String,
-        default: "Astro Wala Shop Commerce Pvt. Ltd.\nIDPL, Rishikesh,\nUttarakhand 249201",
+        default: "Kitab Shop Commerce Pvt. Ltd.\nIDPL, Rishikesh,\nUttarakhand 249201",
         trim: true,
       },
       mapUrl: {

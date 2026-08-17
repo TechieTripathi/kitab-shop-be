@@ -87,6 +87,29 @@ export const notifyReturnUpdated = ({ orderId, userId, status }) =>
     message: `Return status updated to ${status}`,
   });
 
+export const notifyOrderCancelled = ({ orderId, userId, reason, source }) =>
+  queueNotification("order.cancelled", {
+    orderId,
+    userId,
+    message: `Order cancelled by ${source || "customer"}${reason ? ` — ${reason}` : ""}`,
+  });
+
+// The success sign-off (Delivered → Completed). Distinct from order.closed,
+// which is an RTO case being settled.
+export const notifyOrderCompleted = ({ orderId, userId }) =>
+  queueNotification("order.completed", {
+    orderId,
+    userId,
+    message: "Order completed successfully",
+  });
+
+export const notifyOrderClosed = ({ orderId, userId }) =>
+  queueNotification("order.closed", {
+    orderId,
+    userId,
+    message: "Returned order settled",
+  });
+
 export const notifyAbandonedCart = ({ userId, email, phone }) =>
   queueNotification("cart.abandoned", {
     userId,

@@ -1,18 +1,20 @@
 import Product from "../products/Product.model.js";
 import Category from "../categories/Category.model.js";
-import Inventory from "../inventory/inventory.model.js";
 import Cart from "../cart/cart.model.js";
 import Wishlist from "../wishlist/Wishlist.model.js";
 import UserAuthentication from "../../model/User.model.js";
 import UserProfile from "../profiles/UserProfile.model.js";
 import EmailVerification from "../../model/emailverification.model.js";
 import Order from "../orders/Order.model.js";
-import { getFeatures } from "../../config/features.config.js";
+import { EXCLUDE_AWAITING_PAYMENT } from "../orders/order-visibility.js";
+import { NON_REVENUE_STATUSES } from "../orders/order-status.rules.js";
+import InventorySetting from "../inventory/InventorySetting.model.js";
 import { buildLast7Days, dateRange } from "./admin-response.service.js";
 
 export const buildDashboardData = async () => {
   const last7Days = buildLast7Days();
   const last7DaysStart = new Date(last7Days[0].key);
+  const { lowStockThreshold } = await InventorySetting.getSettings();
 
   const [
     totalProducts,
@@ -41,12 +43,20 @@ export const buildDashboardData = async () => {
     Cart.countDocuments(),
     EmailVerification.countDocuments({ isUsed: false }),
     UserAuthentication.countDocuments({ isVerified: true }),
-    Order.countDocuments(),
+    // Excludes prepaid checkouts that were never paid for — they are rows in
+    // `orders`, but they are not orders. See order-visibility.js.
+    Order.countDocuments(EXCLUDE_AWAITING_PAYMENT),
 
     Order.aggregate([
       {
         $match: {
-          orderStatus: { $ne: "Cancelled" },
+          // "Closed" joins "Cancelled": an RTO that came back and was closed out
+          // is not a sale. It used to close out AS "Cancelled", so it was excluded
+          // by accident; now that it has its own status the exclusion has to be
+          // explicit or every closed RTO would start counting as revenue.
+          orderStatus: { $nin: NON_REVENUE_STATUSES },
+          // Without this an abandoned checkout counts as revenue.
+          ...EXCLUDE_AWAITING_PAYMENT,
         },
       },
       {
@@ -57,19 +67,35 @@ export const buildDashboardData = async () => {
       },
     ]),
 
-    Inventory.aggregate([
+    // ── STOCK COMES FROM THE PRODUCT (audit H2-09) ───────────────────────────
+    // This aggregated `InventoryModel`, which no order, cancellation, return, RTO
+    // or reservation path has ever written — `product.stock` is what those paths
+    // move, atomically, via $inc. The two therefore diverged from the first sale
+    // onwards, and in the live database they had diverged completely: 17 inventory
+    // rows, all of them orphaned, reporting 873 units against a real catalogue
+    // total of 7882.
+    //
+    // Reads `product.stock` instead. Deliberately NOT the other direction — nothing
+    // synchronises InventoryModel from the order paths, because that would put a
+    // second, non-atomic ledger write inside every stock movement.
+    //
+    // The in/out-of-stock RULE is carried over unchanged, not redefined: it was
+    // `status === "Out of Stock"`, and InventoryModel derives that field in a
+    // pre-save hook as `stock === 0 ? "Out of Stock" : "In Stock"`. So "out of
+    // stock" still means exactly `stock === 0`, and everything else is in stock.
+    Product.aggregate([
       {
         $group: {
           _id: null,
           totalStock: { $sum: "$stock" },
           inStock: {
             $sum: {
-              $cond: [{ $eq: ["$status", "In Stock"] }, 1, 0],
+              $cond: [{ $eq: ["$stock", 0] }, 0, 1],
             },
           },
           outOfStock: {
             $sum: {
-              $cond: [{ $eq: ["$status", "Out of Stock"] }, 1, 0],
+              $cond: [{ $eq: ["$stock", 0] }, 1, 0],
             },
           },
         },
@@ -123,32 +149,36 @@ export const buildDashboardData = async () => {
       },
     ]),
 
-    Inventory.aggregate([
+    // The reorder signal, and the part of H2-09 that could actually cost money.
+    //
+    // This matched `InventoryModel.stock <= lowStockThreshold`, so a product sold
+    // down to zero never appeared here — its inventory row still held whatever it
+    // was seeded with. In the live database the list came back EMPTY while six
+    // products were at or below the threshold: the operator was never told to
+    // reorder anything.
+    //
+    // Same threshold, from the same place (InventorySetting.getSettings() above) —
+    // no new threshold, and no new configuration. The $lookup is gone because the
+    // product IS the source now, and `status` is computed with InventoryModel's own
+    // rule so the field keeps its existing meaning. Output shape is unchanged:
+    // { productId, productName, brand, image, stock, status }.
+    Product.aggregate([
       {
         $match: {
-          stock: { $lte: getFeatures().inventory.lowStockThreshold },
+          stock: { $lte: lowStockThreshold },
         },
-      },
-      {
-        $lookup: {
-          from: Product.collection.name,
-          localField: "product_id",
-          foreignField: "_id",
-          as: "product",
-        },
-      },
-      {
-        $unwind: "$product",
       },
       {
         $project: {
           _id: 0,
-          productId: "$product._id",
-          productName: "$product.name",
-          brand: "$product.brand",
-          image: "$product.image",
+          productId: "$_id",
+          productName: "$name",
+          brand: "$brand",
+          image: "$image",
           stock: 1,
-          status: 1,
+          status: {
+            $cond: [{ $eq: ["$stock", 0] }, "Out of Stock", "In Stock"],
+          },
         },
       },
       {
@@ -168,6 +198,16 @@ export const buildDashboardData = async () => {
       {
         $match: {
           createdAt: { $gte: last7DaysStart },
+          // A closed RTO must not appear as revenue on the chart either.
+          //
+          // Deliberately excluding "Closed" ONLY, not the whole NON_REVENUE set:
+          // this aggregate has never excluded "Cancelled", so cancelled orders are
+          // counted here today while being excluded from totalRevenue above. That
+          // inconsistency is pre-existing and changing it would alter established
+          // "Cancelled" reporting, which was out of scope for this change — it is
+          // reported separately rather than fixed silently.
+          orderStatus: { $ne: "Closed" },
+          ...EXCLUDE_AWAITING_PAYMENT,
         },
       },
       {
@@ -188,7 +228,7 @@ export const buildDashboardData = async () => {
       },
     ]),
 
-    Order.find()
+    Order.find(EXCLUDE_AWAITING_PAYMENT)
       .populate("user", "email roles")
       .select("user items totalAmount orderStatus paymentStatus paymentMethod shippingAddress createdAt")
       .sort({ createdAt: -1 })
@@ -278,7 +318,10 @@ export const buildSalesReportData = async (query = {}) => {
   const { from, to } = dateRange(query);
   const match = {
     createdAt: { $gte: from, $lte: to },
-    orderStatus: { $ne: "Cancelled" },
+    // Shared by the by-date, by-product, by-category and by-customer aggregates
+    // below, so one exclusion covers all four.
+    orderStatus: { $nin: NON_REVENUE_STATUSES },
+    ...EXCLUDE_AWAITING_PAYMENT,
   };
 
   const [byDate, byProduct, byCategory, byCustomer] = await Promise.all([

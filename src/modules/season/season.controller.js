@@ -124,7 +124,7 @@ export const UpdateCustomSeason = async (req, res) => {
         endMonth: endMonthNumber,
         endDay: endDayNumber,
       },
-      { new: true, runValidators: true },
+      { returnDocument: "after", runValidators: true },
     );
 
     if (!season) {
@@ -153,7 +153,7 @@ export const DeleteCustomSeason = async (req, res) => {
     const season = await Season.findOneAndUpdate(
       { slug, active: true },
       { active: false },
-      { new: true },
+      { returnDocument: "after" },
     );
 
     if (!season) {

@@ -1,0 +1,918 @@
+import crypto from "node:crypto";
+import { isPaymentEnabled } from "../../config/features.config.js";
+import OrderModel from "../orders/Order.model.js";
+import UserProfile from "../profiles/UserProfile.model.js";
+import { getRazorpay, getRazorpayErrorMessage } from "./razorpay.service.js";
+
+const MANUAL_METHODS = ["upi", "bank_transfer", "cash", "wallet", "other"];
+
+// Payment statuses that only a refund can put an order into. Used to decide
+// whether a now-empty refund ledger should fall back to "Paid".
+const REFUND_STATUSES = ["Refund Pending", "Refunded", "Partially Refunded"];
+
+/**
+ * What one line of an order is actually worth refunding.
+ *
+ * Item prices are stored pre-discount, while coupon and wallet reductions are
+ * applied once at the order level — so `price × qty` is what the item listed
+ * for, not what the customer paid. Refunding that on a discounted order would
+ * hand back more than was ever taken (₹150 for an item bought at ₹50 after a
+ * ₹100 coupon). Discounts are therefore spread across lines in proportion to
+ * their share of the subtotal, which is also how the customer would expect a
+ * partial return to be valued.
+ *
+ * The ratio is capped at 1 so a hypothetical order whose total exceeds its
+ * subtotal (shipping or tax added later) can never inflate a refund above the
+ * item's own price.
+ */
+export const proportionalRefundAmount = ({
+  unitPrice,
+  quantity,
+  orderSubtotal,
+  orderTotal,
+  // Deliberately NOT defaulted to 0. A caller that does not say what the shipping
+  // charge was has not told us how much of an excess over the subtotal is
+  // refundable, and guessing "none of it is shipping" would refund freight by
+  // accident. Omitting it therefore keeps the old conservative cap — the new
+  // tax-inclusive behaviour is opt-in, per call site, and visible in the diff.
+  orderShippingCharge,
+} = {}) => {
+  const lineValue = Number(unitPrice) * Number(quantity);
+  if (!Number.isFinite(lineValue) || lineValue <= 0) return 0;
+
+  const subtotal = Number(orderSubtotal);
+  const total = Number(orderTotal);
+  if (!Number.isFinite(subtotal) || subtotal <= 0 || !Number.isFinite(total)) {
+    return Math.round(lineValue * 100) / 100;
+  }
+
+  // ── WHAT IS REFUNDABLE ON A RETURN (audit H2-03) ─────────────────────────
+  // Everything the customer paid EXCEPT the shipping charge:
+  //
+  //   refundable = totalAmount − shippingCharge
+  //              = subtotal + tax − discount
+  //
+  // Tax follows the goods. It is levied on the goods' value, so returning them
+  // reverses the sale it was charged on — keeping it both short-changes the
+  // customer and over-reports the tax we owe. Shipping does not follow the
+  // goods: the parcel was shipped and the courier was paid, so outbound shipping
+  // is not refunded on a return. A pre-dispatch CANCELLATION is the opposite case
+  // — nothing shipped — and that path deliberately refunds the whole
+  // `totalAmount`, shipping included.
+  //
+  // This replaced `lineValue × min(1, total/subtotal)`. That cap existed to stop
+  // an order whose total exceeded its subtotal from refunding more than the
+  // item's list price, but it did so by discarding shipping AND tax together: the
+  // shortfall against what the customer paid was exactly
+  // max(0, shipping + tax − discount). Apportioning by the line's SHARE of the
+  // goods, against a base that already excludes shipping, gets the tax back
+  // without ever exceeding what was paid.
+  // `null` and `""` are treated as NOT TOLD, not as zero — Number() turns both into
+  // 0, which would claim the excess is all tax and refund it. Only an actual value
+  // counts as a declaration.
+  const declared =
+    orderShippingCharge === null || orderShippingCharge === undefined || orderShippingCharge === ""
+      ? Number.NaN
+      : Number(orderShippingCharge);
+  const refundable = Number.isFinite(declared)
+    ? Math.max(0, total - declared)
+    // Shipping unknown: fall back to the pre-H2-03 behaviour and refund no more
+    // than the goods are worth, so an unexplained excess is never paid out.
+    : Math.min(total, subtotal);
+
+  // The line's fraction of the goods. Capped at 1 so bad data (a line worth more
+  // than the whole subtotal) cannot inflate a refund; `refundable ≤ total`, so the
+  // result can never exceed the order total either — and the cumulative ledger
+  // ceiling in claimRefundSlot remains the backstop across multiple returns.
+  const share = Math.min(1, Math.max(0, lineValue / subtotal));
+  return Math.round(share * refundable * 100) / 100;
+};
+
+/**
+ * The wallet-credit half of the same line valuation.
+ *
+ * A customer who paid ₹1000 of goods with ₹200 of wallet credit and ₹800 cash is
+ * owed BOTH back on a full return. proportionalRefundAmount returns the ₹800
+ * (the cash the gateway can reverse); this returns the ₹200, which has to go
+ * back as wallet credit because there is no card transaction to reverse it
+ * against. Previously only the cash half was returned, so every return silently
+ * destroyed the prepaid portion.
+ *
+ * Same subtotal-share ratio as the cash half, so the two always add up to the
+ * full value of the returned goods.
+ */
+export const proportionalWalletRefund = ({
+  unitPrice,
+  quantity,
+  orderSubtotal,
+  walletDiscount,
+}) => {
+  const wallet = Number(walletDiscount);
+  if (!Number.isFinite(wallet) || wallet <= 0) return 0;
+
+  const lineValue = Number(unitPrice) * Number(quantity);
+  const subtotal = Number(orderSubtotal);
+  if (!Number.isFinite(lineValue) || lineValue <= 0) return 0;
+  if (!Number.isFinite(subtotal) || subtotal <= 0) return 0;
+
+  const share = Math.min(1, lineValue / subtotal);
+  return Math.round(wallet * share * 100) / 100;
+};
+
+/**
+ * Credits wallet money back to the customer, capped at what this order actually
+ * spent from the wallet and at what has not already been returned.
+ *
+ * Claim-then-pay, in that order and deliberately: the headroom is consumed by a
+ * conditional `$inc` on the order first, and only a winning claim credits the
+ * balance. Crediting first would double-pay on any retry, whereas a crash
+ * between the two steps merely under-credits — visible in `walletRefunded` and
+ * fixable by an admin. Under-crediting is recoverable; over-crediting is money
+ * gone.
+ *
+ * Returns the amount actually credited (0 if there was no headroom).
+ */
+export const restoreWalletCredit = async ({ order, amount, session = null }) => {
+  const walletSpent = Number(order?.walletDiscount) || 0;
+  if (walletSpent <= 0 || !order?.user) return 0;
+
+  const requested = Math.round((Number(amount) || 0) * 100) / 100;
+  if (requested <= 0) return 0;
+
+  const alreadyRestored = Number(order.walletRefunded) || 0;
+  const headroom = Math.round((walletSpent - alreadyRestored) * 100) / 100;
+  if (headroom <= 0) return 0;
+
+  const credit = Math.min(requested, headroom);
+  const options = session ? { session } : {};
+
+  // The $expr keeps the cap in the FILTER, so two concurrent refunds on one
+  // order cannot both pass a read-then-write check and over-credit.
+  const claimed = await OrderModel.findOneAndUpdate(
+    {
+      _id: order._id,
+      $expr: {
+        $lte: [
+          { $add: [{ $ifNull: ["$walletRefunded", 0] }, credit] },
+          walletSpent + 0.01,
+        ],
+      },
+    },
+    { $inc: { walletRefunded: credit } },
+    { ...options, returnDocument: "after" },
+  );
+  if (!claimed) return 0;
+
+  await UserProfile.updateOne(
+    { userid: order.user },
+    { $inc: { walletBalance: credit } },
+    options,
+  );
+
+  // Keep the in-memory document consistent with what was just persisted, so a
+  // later order.save() in the same request cannot write back a stale value.
+  order.walletRefunded = claimed.walletRefunded;
+  return credit;
+};
+
+const fail = (message, statusCode, code) =>
+  Object.assign(new Error(message), { statusCode, code });
+
+/**
+ * Money committed to being refunded — everything except `failed`, so it includes
+ * `owed` (liability recorded, nothing attempted) and `created` (gateway called,
+ * outcome unknown). Deliberately conservative: this is the "never refund more
+ * than was paid" ceiling, and counting an unsettled refund is what stops a second
+ * one slipping past the cap.
+ */
+export const sumRefunded = (order) =>
+  (order.refunds || [])
+    .filter((refund) => refund.status !== "failed")
+    .reduce((total, refund) => total + Number(refund.amount || 0), 0);
+
+/**
+ * Money the business owes but has not yet even attempted to send.
+ *
+ * This is the payout/action queue: COD returns that passed QC and prepaid RTOs
+ * that came back. Before the `owed` state existed these had no ledger row at all
+ * until someone acted on them, so the liability was invisible — you could not
+ * answer "how much do we owe customers right now?" from the data.
+ */
+export const sumOwedRefunds = (order) =>
+  (order.refunds || [])
+    .filter((refund) => refund.status === "owed")
+    .reduce((total, refund) => total + Number(refund.amount || 0), 0);
+
+/**
+ * Money already committed to refunds, as a SERVER-SIDE aggregation expression.
+ *
+ * Mirrors sumRefunded() exactly (everything except `failed`). The point of having
+ * it in this form is that MongoDB evaluates it against the live document inside
+ * the update filter, so the ceiling becomes a real precondition instead of a
+ * value read into the application a moment earlier.
+ */
+const COMMITTED_REFUND_SUM = {
+  $reduce: {
+    input: {
+      $filter: {
+        input: { $ifNull: ["$refunds", []] },
+        as: "refund",
+        cond: { $ne: ["$$refund.status", "failed"] },
+      },
+    },
+    initialValue: 0,
+    in: { $add: ["$$value", { $ifNull: ["$$this.amount", 0] }] },
+  },
+};
+
+/**
+ * A stable key for callers that don't supply one.
+ *
+ * Derived from the order, the exact paise amount and the reason, so a repeated
+ * request for the same refund collapses onto one record while a genuinely
+ * different refund (different amount or reason) gets its own. Deterministic on
+ * purpose — a random key per request would defeat the whole guard.
+ */
+export const deriveRefundIdempotencyKey = ({ orderId, amount, reason = "" }) => {
+  const paise = Math.round((Number(amount) || 0) * 100);
+  const digest = crypto.createHash("sha1").update(String(reason)).digest("hex").slice(0, 12);
+  return `auto:${orderId}:${paise}:${digest}`;
+};
+
+/**
+ * Claims the right to make ONE refund, atomically.
+ *
+ * Both preconditions live in the FILTER, so MongoDB's single-document atomicity
+ * picks the winner and the loser cannot proceed:
+ *
+ *   1. IDEMPOTENCY — no live (non-`failed`) refund already carries this key.
+ *   2. CEILING     — committed + this amount stays within `totalAmount`.
+ *
+ * This replaces a read-then-act pair (read `sumRefunded`, check, then push and
+ * save). Mongoose does NOT version-guard a subdocument-array `$push`, so two
+ * concurrent handlers both saved and both went on to call the gateway — two real
+ * refunds against one order. Verified by probing the driver, not assumed.
+ *
+ * Losing the claim is not an error when the key already exists: the existing
+ * record is returned so the caller can adopt it and stay idempotent. It is only
+ * an error when the ceiling is what rejected the write.
+ *
+ * @returns {{order, refund, created: boolean}} `created: false` means adopt, don't re-refund.
+ */
+export const claimRefundSlot = async ({
+  orderId,
+  idempotencyKey,
+  amount,
+  record = {},
+  session = null,
+}) => {
+  const value = Math.round((Number(amount) || 0) * 100) / 100;
+  if (!Number.isFinite(value) || value <= 0) {
+    throw fail("Invalid refund amount", 400, "INVALID_REFUND_AMOUNT");
+  }
+  if (!idempotencyKey) {
+    throw fail("A refund idempotency key is required", 400, "REFUND_KEY_REQUIRED");
+  }
+
+  const options = session ? { session } : {};
+
+  const claimed = await OrderModel.findOneAndUpdate(
+    {
+      _id: orderId,
+      refunds: {
+        $not: { $elemMatch: { idempotencyKey, status: { $ne: "failed" } } },
+      },
+      $expr: {
+        $lte: [
+          { $add: [COMMITTED_REFUND_SUM, value] },
+          { $add: [{ $ifNull: ["$totalAmount", 0] }, 0.01] },
+        ],
+      },
+    },
+    { $push: { refunds: { ...record, idempotencyKey, amount: value } } },
+    { ...options, returnDocument: "after" },
+  );
+
+  if (claimed) {
+    return { order: claimed, refund: claimed.refunds.at(-1), created: true };
+  }
+
+  // Lost the claim. Two very different reasons, and they need different answers.
+  const current = await OrderModel.findById(orderId).session(session || null);
+  if (!current) throw fail("Order not found", 404, "ORDER_NOT_FOUND");
+
+  const existing = (current.refunds || []).find(
+    (entry) => entry.idempotencyKey === idempotencyKey && entry.status !== "failed",
+  );
+  if (existing) return { order: current, refund: existing, created: false };
+
+  const committed = sumRefunded(current);
+  const headroom = Math.round((Number(current.totalAmount) - committed) * 100) / 100;
+  throw fail(
+    headroom <= 0
+      ? `This order has already been fully refunded (₹${committed} of ₹${current.totalAmount}).`
+      : `Refunding ₹${value} would exceed the order total — at most ₹${headroom} remains refundable (₹${committed} already committed).`,
+    400,
+    "REFUND_EXCEEDS_ORDER_TOTAL",
+  );
+};
+
+/**
+ * How long a gateway call is assumed to still be in flight.
+ *
+ * Beyond this an attempt is treated as abandoned, so a retry may take it over —
+ * after reconciling against the gateway first. Generous on purpose: taking an
+ * attempt over too eagerly is what risks a double refund, while taking it over
+ * too late merely delays a retry an operator can trigger again.
+ */
+const GATEWAY_ATTEMPT_STALE_MS = 2 * 60 * 1000;
+
+/**
+ * Claims the right to actually CALL the gateway for one refund row.
+ *
+ * Winning the ledger row (claimRefundSlot) decides who owns the refund; this
+ * decides who may talk to Razorpay right now. They are genuinely different
+ * questions, and conflating them left a hole: the request that lost the row
+ * would find it `created`, ask the gateway whether that refund existed, be told
+ * "no" — because the winner's call was still in flight — and take that as proof
+ * the earlier attempt never happened. It would then refund again.
+ *
+ * The precondition is in the filter, so only one holder exists at a time. A row
+ * whose attempt is older than `staleAfterMs` can be taken over, which is what
+ * keeps a genuine timeout recoverable.
+ *
+ * @returns {boolean} true if this caller may proceed to the gateway.
+ */
+export const claimGatewayAttempt = async ({
+  orderId,
+  refundId,
+  staleAfterMs = GATEWAY_ATTEMPT_STALE_MS,
+  session = null,
+}) => {
+  const cutoff = new Date(Date.now() - staleAfterMs);
+  const claimed = await OrderModel.findOneAndUpdate(
+    {
+      _id: orderId,
+      refunds: {
+        $elemMatch: {
+          _id: refundId,
+          status: { $ne: "processed" },
+          $or: [
+            { gatewayAttemptedAt: null },
+            { gatewayAttemptedAt: { $exists: false } },
+            { gatewayAttemptedAt: { $lte: cutoff } },
+          ],
+        },
+      },
+    },
+    { $set: { "refunds.$.gatewayAttemptedAt": new Date() } },
+    { ...(session ? { session } : {}), returnDocument: "after" },
+  );
+  return Boolean(claimed);
+};
+
+/**
+ * Persists the outcome of a gateway call onto one refund row, by _id.
+ *
+ * Targeted positional update rather than `order.save()`: the claim above wrote
+ * via the collection, so a whole-document save from a stale in-memory copy could
+ * drop a refund row a concurrent handler had legitimately added.
+ */
+export const settleRefundRecord = async ({
+  orderId,
+  refundId,
+  providerRefundId,
+  status,
+  failureReason = "",
+  releaseAttempt = false,
+  session = null,
+}) => {
+  const set = { "refunds.$.status": status, "refunds.$.failureReason": failureReason };
+  if (providerRefundId !== undefined) set["refunds.$.providerRefundId"] = providerRefundId;
+  if (status === "processed") set["refunds.$.processedAt"] = new Date();
+  // The gateway call returned (with an error) — so it is demonstrably no longer in
+  // flight, and holding the attempt claim would make an operator wait out the
+  // staleness window for no reason. Safe to release because the retry reconciles
+  // against the gateway before it refunds anything.
+  if (releaseAttempt) set["refunds.$.gatewayAttemptedAt"] = null;
+
+  await OrderModel.updateOne(
+    { _id: orderId, "refunds._id": refundId },
+    { $set: set },
+    session ? { session } : {},
+  );
+
+  const fresh = await OrderModel.findById(orderId).session(session || null);
+  if (fresh) await recomputeRefundState(fresh, { session });
+  return fresh;
+};
+
+/**
+ * The stable reconciliation key for a cancellation refund.
+ *
+ * Two different shapes because the two paths have different cardinality:
+ *
+ *   full cancel     one per order — the orderStatus claim in CancelOrder
+ *                   guarantees a single execution, so the order id is enough.
+ *   partial cancel  many per order — keyed on the `cancellations[]` subdocument
+ *                   that caused it, so two genuinely separate partial
+ *                   cancellations each get their own refund while retries of one
+ *                   collapse onto a single record.
+ *
+ * Keying a partial cancel on the order id would have been wrong in the expensive
+ * direction: the second partial cancellation would look like a duplicate of the
+ * first and silently refund nothing.
+ */
+export const cancellationRefundKey = ({ orderId, cancellationId = null }) =>
+  cancellationId ? `partial-cancel:${cancellationId}` : `cancel:${orderId}`;
+
+/**
+ * Moves money for a refund row that already exists in the ledger, safely.
+ *
+ * Extracted so the cancellation paths run the same sequence the returns and
+ * admin paths do, instead of each hand-rolling the gateway call:
+ *
+ *   1. claim the gateway attempt, so a retry cannot race an in-flight call
+ *   2. if a previous attempt exists, ASK the gateway before trying again
+ *   3. call Razorpay with `notes.refundKey`, which is what makes step 2 possible
+ *   4. record what the gateway actually said, and re-derive paymentStatus
+ *
+ * Callers own the ledger row and the amount; this owns the money movement. It
+ * assumes a gateway refund is appropriate — gate on `canAutoRefund(order)` first,
+ * so COD and other offline orders never reach here.
+ *
+ * @returns {{outcome: "refunded"|"reconciled"|"gateway_failed"|"in_progress"|"unconfirmed", ...}}
+ */
+export const settleGatewayRefund = async ({
+  order,
+  refundId,
+  amount,
+  refundKey,
+  reason,
+  speed = "normal",
+}) => {
+  // Read the row BEFORE claiming, to learn whether anyone has already tried.
+  // Reading first can only mis-read a concurrent attempt that has just started —
+  // and that case is caught by the claim below failing, so the conservative
+  // decision (reconcile) is never skipped.
+  const before = await OrderModel.findOne(
+    { _id: order._id, "refunds._id": refundId },
+    { "refunds.$": 1 },
+  ).lean();
+  const prior = before?.refunds?.[0];
+  if (!prior) {
+    throw fail("Refund record not found on this order", 404, "REFUND_RECORD_NOT_FOUND");
+  }
+  if (prior.status === "processed") {
+    return { outcome: "reconciled", providerRefundId: prior.providerRefundId, alreadySettled: true };
+  }
+  const hadPriorAttempt = Boolean(prior.gatewayAttemptedAt) || Boolean(prior.failureReason);
+
+  const mayCallGateway = await claimGatewayAttempt({ orderId: order._id, refundId });
+  if (!mayCallGateway) {
+    return { outcome: "in_progress" };
+  }
+
+  if (hadPriorAttempt) {
+    let existing;
+    try {
+      existing = await findGatewayRefundByNote({
+        order,
+        noteKey: "refundKey",
+        noteValue: refundKey,
+        label: reason || refundKey,
+      });
+    } catch (error) {
+      // Razorpay unreachable. Refusing to retry blindly is the whole point:
+      // "unknown" is not "didn't happen".
+      await settleRefundRecord({
+        orderId: order._id,
+        refundId,
+        status: "created",
+        failureReason: error.message,
+        releaseAttempt: true,
+      });
+      return { outcome: "unconfirmed", message: error.message };
+    }
+    if (existing) {
+      await settleRefundRecord({
+        orderId: order._id,
+        refundId,
+        providerRefundId: existing.id,
+        status: existing.status === "failed" ? "failed" : "processed",
+      });
+      return { outcome: "reconciled", providerRefundId: existing.id };
+    }
+    // Confirmed absent at the gateway, so reusing this row cannot double-pay.
+  }
+
+  let refund;
+  try {
+    const { razorpay } = getRazorpay();
+    refund = await razorpay.payments.refund(order.razorpayPaymentId, {
+      amount: Math.round(Number(amount) * 100),
+      speed,
+      notes: {
+        reason: String(reason || "Refund").slice(0, 250),
+        refundKey,
+      },
+    });
+  } catch (error) {
+    await settleRefundRecord({
+      orderId: order._id,
+      refundId,
+      // Stays `created`, never `failed`. `failed` is excluded from the ceiling
+      // and from the duplicate lookup, so recording an unknown outcome as failed
+      // is what lets a later attempt refund the same money again.
+      status: "created",
+      failureReason: getRazorpayErrorMessage(error),
+      releaseAttempt: true,
+    });
+    return { outcome: "gateway_failed", message: getRazorpayErrorMessage(error) };
+  }
+
+  await settleRefundRecord({
+    orderId: order._id,
+    refundId,
+    providerRefundId: refund.id,
+    // Razorpay reports `pending` for normal-speed refunds and settles
+    // asynchronously, so record what it actually said rather than assuming.
+    status: refund.status === "failed" ? "failed" : "processed",
+  });
+  return { outcome: "refunded", providerRefundId: refund.id, gatewayStatus: refund.status };
+};
+
+/**
+ * Records a refund LIABILITY without attempting to move money.
+ *
+ * Used where the obligation is created by an event but settled later by a
+ * separate action — a COD return passing QC (admin pays out by UPI/bank), or a
+ * prepaid RTO parcel arriving back (operator actions the gateway refund). The
+ * ledger row exists from the moment the debt does.
+ *
+ * Idempotent: keyed on `dedupeKey`, so a replayed webhook or a double-clicked
+ * button records one liability, not two. Respects the cumulative ceiling.
+ */
+export const recordRefundObligation = async ({
+  order,
+  amount,
+  reason,
+  dedupeKey,
+  returnRequest = null,
+  confirmationMethod = "gateway",
+  createdBy = null,
+  session = null,
+}) => {
+  const owedAmount = Math.round((Number(amount) || 0) * 100) / 100;
+  if (owedAmount <= 0) return { refund: null, created: false };
+
+  // ── NEVER OWE MONEY TO SOMEONE WHO DIDN'T PAY ────────────────────────────
+  // Enforced here, not only in the callers. A COD order that has not been
+  // delivered has collected nothing, so there is nothing to give back — and an
+  // RTO is precisely the case where that is easy to get wrong, because the parcel
+  // coming back *looks* like a return. Keeping the rule at the level of the
+  // invariant means a future caller cannot reintroduce the mistake by forgetting
+  // to check.
+  const moneyCollected = MONEY_COLLECTED_PAYMENT_STATUSES.includes(order?.paymentStatus);
+  if (!moneyCollected) {
+    return { refund: null, created: false, noMoneyCollected: true };
+  }
+
+  const existing = (order.refunds || []).find(
+    (refund) => refund.reason === dedupeKey && refund.status !== "failed",
+  );
+  if (existing) return { refund: existing, created: false };
+
+  const alreadyCommitted = sumRefunded(order);
+  const headroom = Math.round((Number(order.totalAmount) - alreadyCommitted) * 100) / 100;
+  if (headroom <= 0) return { refund: null, created: false, noHeadroom: true };
+
+  order.refunds.push({
+    paymentProvider: confirmationMethod === "manual" ? "manual" : "razorpay",
+    providerPaymentId: order.razorpayPaymentId || "",
+    returnRequest,
+    amount: Math.min(owedAmount, headroom),
+    // The dedupe key IS the reason string, so the idempotency guard is visible in
+    // the ledger rather than hidden in a side field.
+    reason: dedupeKey,
+    status: "owed",
+    confirmationMethod,
+    createdBy,
+  });
+  await recomputeRefundState(order, { session });
+
+  return { refund: order.refunds.at(-1), created: true, note: reason };
+};
+
+/**
+ * The payment states in which money HAS been captured, and is therefore refundable.
+ *
+ * Derived from what recomputeRefundState below can actually produce, not chosen:
+ *
+ *   Paid               captured, nothing refunded
+ *   Refund Pending     captured; committed > 0 and settled == 0
+ *   Partially Refunded captured; 0 < settled < total
+ *   Refunded           captured; settled >= total
+ *
+ * The last three are reachable ONLY when a refund row exists, and a refund row can
+ * only exist against a captured payment — so all four mean money was collected.
+ * "Pending" and "Failed" are the only states that mean it was not.
+ *
+ * Exported because this list was previously written out by hand at each gate, and
+ * the copies drifted. `recordRtoRefundObligation` in shipping.controller.js kept the
+ * two-value version {Paid, Partially Refunded}, so an RTO on an order sitting at
+ * "Refund Pending" — a prepaid customer with an unsettled partial refund — was told
+ * "no payment was ever collected" and its liability was never recorded at all. The
+ * customer had paid in full and received nothing.
+ *
+ * A gate that answers "was money collected?" must answer it the same way everywhere,
+ * so there is one list and every caller reads it.
+ */
+export const MONEY_COLLECTED_PAYMENT_STATUSES = [
+  "Paid",
+  "Partially Refunded",
+  "Refund Pending",
+  "Refunded",
+];
+
+/**
+ * Money that has DEMONSTRABLY moved — `processed` only.
+ *
+ * Kept separate from sumRefunded because paymentStatus must never say
+ * "Refunded" on the strength of an intent record. That distinction is the whole
+ * invariant of this module: a status may not claim something that hasn't
+ * happened.
+ */
+export const sumSettledRefunds = (order) =>
+  (order.refunds || [])
+    .filter((refund) => refund.status === "processed")
+    .reduce((total, refund) => total + Number(refund.amount || 0), 0);
+
+/**
+ * Derives paymentStatus from the refund ledger and persists the order.
+ *
+ * Single place for this so the "how much has actually been refunded" rule can't
+ * drift between call sites — one of the audit findings was the admin endpoint
+ * hand-rolling its own total that counted `failed` refunds.
+ */
+export const recomputeRefundState = async (order, { session = null } = {}) => {
+  // Settled only — an `owed` or `created` record must never move the status to
+  // "Refunded".
+  const settled = sumSettledRefunds(order);
+  const committed = sumRefunded(order);
+  const total = Number(order.totalAmount) || 0;
+
+  if (settled >= total - 0.01 && total > 0) {
+    order.paymentStatus = "Refunded";
+  } else if (settled > 0) {
+    order.paymentStatus = "Partially Refunded";
+  } else if (committed > 0) {
+    // Money is owed and an attempt exists, but nothing has actually moved yet.
+    order.paymentStatus = "Refund Pending";
+  } else if (REFUND_STATUSES.includes(order.paymentStatus)) {
+    // Nothing settled AND nothing in flight: every refund on this order failed,
+    // so the money never left us. Without this branch the order stayed stuck in
+    // "Refund Pending"/"Refunded" after a gateway-failed refund — the status
+    // claiming a movement that had been reversed. Only orders already in a
+    // refund state are touched, so a COD order still awaiting collection keeps
+    // its "Pending".
+    order.paymentStatus = "Paid";
+  }
+
+  await order.save(session ? { session } : undefined);
+  return order.paymentStatus;
+};
+
+export const findRefundForReturn = (order, returnId) =>
+  (order.refunds || []).find(
+    (refund) =>
+      String(refund.returnRequest || "") === String(returnId) && refund.status !== "failed",
+  );
+
+// True when the money can be pushed back through the gateway automatically.
+// Anything else (COD, or a Razorpay order whose payment id was never captured)
+// has to be settled out-of-band and recorded by the admin.
+export const canAutoRefund = (order) =>
+  order.paymentMethod === "RAZORPAY" && Boolean(order.razorpayPaymentId) && isPaymentEnabled();
+
+/**
+ * Settles a return by actually moving money, then records it on the order.
+ *
+ * Deliberately throws instead of returning a soft failure: the caller marks the
+ * return "refunded" only if this resolves, so the customer is never told they
+ * were refunded when they weren't. Returns the refund subdocument that was
+ * recorded (or the pre-existing one, making a retry idempotent).
+ */
+/**
+ * Asks Razorpay whether a refund for this return already exists.
+ *
+ * This is what makes a retry after a network timeout safe. Every gateway refund
+ * is tagged with `notes.returnNumber`, so if the previous attempt actually
+ * reached Razorpay before the connection dropped, it can be found and adopted
+ * instead of issuing a second one.
+ *
+ * @returns the matching gateway refund, or null if there demonstrably isn't one.
+ * @throws if Razorpay cannot be reached — callers must NOT fall back to
+ *         refunding again, because "unknown" is not "didn't happen".
+ */
+export const findGatewayRefundByNote = async ({ order, noteKey, noteValue, label }) => {
+  const { razorpay } = getRazorpay();
+  let response;
+  try {
+    response = await razorpay.payments.fetchMultipleRefund(order.razorpayPaymentId, { count: 100 });
+  } catch (error) {
+    throw fail(
+      `A refund for ${label} may already have been issued, but Razorpay could not be reached to confirm: ${getRazorpayErrorMessage(error)}. Check the Razorpay dashboard before retrying — retrying blindly could refund this customer twice.`,
+      502,
+      "REFUND_RECONCILE_UNAVAILABLE",
+    );
+  }
+
+  const refunds = Array.isArray(response?.items) ? response.items : [];
+  return (
+    refunds.find((refund) => String(refund?.notes?.[noteKey] || "") === String(noteValue)) || null
+  );
+};
+
+const findGatewayRefundForReturn = ({ order, returnRequest }) =>
+  findGatewayRefundByNote({
+    order,
+    noteKey: "returnNumber",
+    noteValue: returnRequest.returnNumber,
+    label: returnRequest.returnNumber,
+  });
+
+export const refundReturnRequest = async ({ order, returnRequest, adminId, manual = {} }) => {
+  // ── WALLET HALF, FIRST ──────────────────────────────────────────────────────
+  // Deliberately before the gateway work and before every early return, because
+  // restoreWalletCredit is idempotent (capped by order.walletRefunded) while the
+  // gateway call is not. Doing it here means the prepaid portion reaches the
+  // customer even if the card refund then fails, and a retry cannot double it.
+  // It also back-fills returns that were settled before this split existed.
+  const walletCredited = await restoreWalletCredit({
+    order,
+    amount: returnRequest.walletRefundAmount,
+  });
+
+  const existing = findRefundForReturn(order, returnRequest._id);
+
+  if (existing) {
+    // Already settled — hand it back so the caller can finish flipping status.
+    if (existing.status === "processed") {
+      return { refund: existing, alreadyRefunded: true, walletCredited };
+    }
+
+    // A "created" record means a previous attempt got as far as writing its
+    // intent. Whether the gateway processed it is UNKNOWN — this is exactly the
+    // timeout case where the old code recorded nothing, so a retry paid the
+    // customer twice. Ask Razorpay rather than assume.
+    if (canAutoRefund(order)) {
+      const gatewayRefund = await findGatewayRefundForReturn({ order, returnRequest });
+      if (gatewayRefund) {
+        existing.providerRefundId = gatewayRefund.id;
+        existing.status = "processed";
+        existing.processedAt = new Date();
+        existing.failureReason = "";
+        await recomputeRefundState(order);
+        return { refund: existing, alreadyRefunded: true, adopted: true, walletCredited };
+      }
+      // Confirmed absent at the gateway: the earlier attempt never landed, so
+      // reusing this record for a fresh attempt cannot double-pay.
+    }
+  }
+
+  const amount = Number(returnRequest.refundAmount);
+  if (!Number.isFinite(amount) || amount < 0) {
+    throw fail("This return has no valid refund amount", 400, "INVALID_REFUND_AMOUNT");
+  }
+  if (amount === 0) {
+    // Nothing to reverse through the gateway. Legitimate when the line was paid
+    // entirely from wallet credit, which has already been returned above — the
+    // refund is complete, so don't fabricate a zero-value gateway call or a
+    // zero-value ledger row.
+    if (walletCredited > 0) {
+      return { refund: null, alreadyRefunded: false, walletCredited, walletOnly: true };
+    }
+    throw fail("This return has no valid refund amount", 400, "INVALID_REFUND_AMOUNT");
+  }
+
+  // Never let cumulative refunds exceed what the customer actually paid.
+  const alreadyRefunded = sumRefunded(order);
+  if (alreadyRefunded + amount > Number(order.totalAmount) + 0.01) {
+    throw fail(
+      `Refunding ₹${amount} would exceed the order total (₹${order.totalAmount}, already refunded ₹${alreadyRefunded})`,
+      400,
+      "REFUND_EXCEEDS_ORDER_TOTAL",
+    );
+  }
+
+  let refundRecord;
+
+  if (canAutoRefund(order)) {
+    // ── INTENT FIRST ────────────────────────────────────────────────────────
+    // The record is persisted BEFORE the gateway is called. Previously the call
+    // came first, so a response timeout on a refund Razorpay had actually
+    // processed left no trace at all — and the operator's retry paid the
+    // customer a second time. With the intent on disk, a retry finds it and
+    // reconciles against Razorpay instead of blindly re-refunding.
+    let pending = existing;
+    if (!pending) {
+      order.refunds.push({
+        paymentProvider: "razorpay",
+        providerRefundId: "",
+        providerPaymentId: order.razorpayPaymentId,
+        returnRequest: returnRequest._id,
+        amount,
+        reason: `Return ${returnRequest.returnNumber}`,
+        status: "created",
+        // Confirmed by Razorpay's refund.processed webhook, not by a human.
+        confirmationMethod: "gateway",
+        createdBy: adminId,
+      });
+      await order.save();
+      pending = order.refunds.at(-1);
+    }
+
+    const { razorpay } = getRazorpay();
+    let refund;
+    try {
+      refund = await razorpay.payments.refund(order.razorpayPaymentId, {
+        // Razorpay works in paise; rounding here (not truncating) avoids
+        // short-changing the customer by a paisa on odd amounts.
+        amount: Math.round(amount * 100),
+        speed: "normal",
+        notes: {
+          reason: `Return ${returnRequest.returnNumber}`,
+          // The reconciliation key — see findGatewayRefundForReturn.
+          returnNumber: returnRequest.returnNumber,
+        },
+      });
+    } catch (error) {
+      // Leave the intent as "created", not "failed": `failed` is excluded from
+      // sumRefunded and from findRefundForReturn, which would make the next
+      // attempt skip reconciliation and risk a double payment. "created"
+      // deliberately means "outcome unknown — verify before retrying".
+      pending.failureReason = getRazorpayErrorMessage(error);
+      await order.save();
+      throw fail(
+        `Razorpay refund failed: ${getRazorpayErrorMessage(error)}. The attempt is recorded as pending — retrying will check with Razorpay first rather than refunding twice.`,
+        502,
+        "GATEWAY_REFUND_FAILED",
+      );
+    }
+
+    pending.providerRefundId = refund.id;
+    // Razorpay may return "pending" for normal-speed refunds and settle
+    // asynchronously, so record what the gateway actually said instead of
+    // assuming success.
+    pending.status = refund.status === "failed" ? "failed" : "processed";
+    pending.processedAt = new Date();
+    pending.failureReason = "";
+    await recomputeRefundState(order);
+    return {
+      refund: pending,
+      alreadyRefunded: false,
+      gatewayStatus: refund.status,
+      walletCredited,
+    };
+  } else {
+    // COD and other offline orders: there's no payment to reverse, so the admin
+    // must have already paid the customer and supply a reference. Without one
+    // there'd be no evidence the refund happened — exactly the "says refunded
+    // but isn't" problem this service exists to prevent.
+    const method = String(manual.method || "").toLowerCase();
+    const reference = String(manual.reference || "").trim();
+
+    if (!MANUAL_METHODS.includes(method) || !reference) {
+      throw fail(
+        `This order was not paid through Razorpay, so the refund has to be settled manually. Record how you refunded the customer (${MANUAL_METHODS.join(", ")}) and a reference number.`,
+        400,
+        "MANUAL_REFUND_DETAILS_REQUIRED",
+      );
+    }
+
+    refundRecord = {
+      paymentProvider: "manual",
+      providerRefundId: reference,
+      providerPaymentId: "",
+      returnRequest: returnRequest._id,
+      amount,
+      reason: `Return ${returnRequest.returnNumber} — refunded via ${method}`,
+      // "processed" is honest here: unlike the gateway path there is no
+      // asynchronous settlement to wait for. The admin has already moved the money
+      // by hand and is recording the reference that proves it — the reference is
+      // mandatory precisely so this status is backed by evidence.
+      status: "processed",
+      confirmationMethod: "manual",
+      processedAt: new Date(),
+      createdBy: adminId,
+    };
+  }
+
+  order.refunds.push(refundRecord);
+  await recomputeRefundState(order);
+
+  return { refund: order.refunds.at(-1), alreadyRefunded: false, walletCredited };
+};
+
+export { MANUAL_METHODS };

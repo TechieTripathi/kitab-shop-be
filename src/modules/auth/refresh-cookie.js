@@ -3,7 +3,7 @@ const TRUE_VALUES = new Set(["1", "true", "yes", "on", "enabled"]);
 export const isRefreshCookieEnabled = () =>
   TRUE_VALUES.has(String(process.env.REFRESH_TOKEN_COOKIE_ENABLED ?? "true").toLowerCase());
 
-const cookieName = () => process.env.REFRESH_TOKEN_COOKIE_NAME || "astromart_refresh_token";
+const cookieName = () => process.env.REFRESH_TOKEN_COOKIE_NAME || "kitab_refresh_token";
 
 const isProduction = () => process.env.NODE_ENV === "production";
 

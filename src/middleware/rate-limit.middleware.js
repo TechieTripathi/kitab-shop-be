@@ -130,3 +130,51 @@ export const paymentRateLimit = createRateLimit({
   max: 40,
   message: "Too many payment attempts. Please try again in a few minutes.",
 });
+
+/**
+ * Admin refund actions, which move real money irreversibly.
+ *
+ * Tighter than the customer-facing payment limit because the failure mode is
+ * worse and the legitimate rate is far lower: no operator refunds more than a
+ * handful of orders a minute by hand. The refund endpoint had NO limit at all
+ * while every other payment route had one, which is what made a duplicate-refund
+ * race cheap to trigger by simply clicking twice.
+ *
+ * This is a backstop, not the guard — the real protection is the atomic claim in
+ * return-refund.service.js. Two layers on purpose: the limit caps how fast the
+ * race can be attempted, the claim decides who wins it.
+ */
+export const refundRateLimit = createRateLimit({
+  name: "refund",
+  windowMs: MINUTE,
+  max: 10,
+  message: "Too many refund attempts. Please wait a moment and check the order before retrying.",
+});
+
+/**
+ * Customer-initiated order actions: cancellation and return requests.
+ *
+ * Both are compare-and-swap protected now, but an unlimited endpoint is what made
+ * those races cheap to drive in the first place — and a return request creates a
+ * record an operator has to triage, so it is worth a ceiling on its own.
+ */
+export const orderActionRateLimit = createRateLimit({
+  name: "order-action",
+  windowMs: 10 * MINUTE,
+  max: 20,
+  message: "Too many cancellation or return attempts. Please try again in a few minutes.",
+});
+
+/**
+ * Admin batch work is legitimate at volumes a customer's cancel never reaches —
+ * an operator cancelling twenty orders after a supplier failure was hitting the
+ * shared 20/10-min bucket above and reading the 429 as "cancellation is broken".
+ * Separate bucket, higher ceiling; the endpoint behind it is still permission-
+ * gated (orders:manage) and protected by an atomic status claim.
+ */
+export const adminOrderActionRateLimit = createRateLimit({
+  name: "admin-order-action",
+  windowMs: 10 * MINUTE,
+  max: 100,
+  message: "Too many order actions in a short time. Please pause briefly and try again.",
+});

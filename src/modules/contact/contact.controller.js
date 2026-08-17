@@ -4,7 +4,7 @@ import ContactMessage from "./contactMessage.model.js";
 const SUBJECTS = new Set([
   "Order Issue",
   "Product Question",
-  "Astrologer Consultation",
+  "Book Recommendation",
   "Become a Seller",
   "Other",
 ]);

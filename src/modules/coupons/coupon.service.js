@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
 import CouponModel from "./coupon.model.js";
 import OrderModel from "../orders/Order.model.js";
+import { EXCLUDE_AWAITING_PAYMENT } from "../orders/order-visibility.js";
 import ProductModel from "../products/Product.model.js";
 
 export const normalizeCouponId = (couponId = "") =>
@@ -20,15 +21,26 @@ const getQuantityFromItem = (item = {}) => Math.max(1, Number(item.quantity || i
 const getUserUsage = (coupon, userId) =>
   coupon.usedBy.find((usage) => String(usage.user) === String(userId));
 
-const hasUserPlacedOrderWithCoupon = async ({ couponId, userId, session }) => {
+/**
+ * How many live orders this user has already placed with this coupon.
+ *
+ * A COUNT rather than the old boolean: with maxLimit now enforced as the
+ * per-user allowance, "has used it at all" would still cap every coupon at one
+ * use regardless of what the admin configured.
+ */
+const countOrdersWithCoupon = async ({ couponId, userId, session }) => {
   const query = {
     user: userId,
     coupon: normalizeCouponId(couponId),
     paymentStatus: { $ne: "Failed" },
+    // An unpaid prepaid checkout is not a use. Without this, starting a Razorpay
+    // checkout with a coupon and abandoning it would consume the customer's
+    // allowance for a discount they never received.
+    ...EXCLUDE_AWAITING_PAYMENT,
   };
-  const lookup = OrderModel.exists(query);
+  const lookup = OrderModel.countDocuments(query);
   if (session) lookup.session(session);
-  return Boolean(await lookup);
+  return Number(await lookup) || 0;
 };
 
 const getCouponTargetType = (coupon) => {
@@ -86,15 +98,31 @@ export const calculateCouponDiscount = async ({
     throw couponError("This coupon is assigned to another user");
   }
 
+  // maxLimit is the PER-USER allowance. It was stored, editable in the admin UI,
+  // reported on the coupons report — and read by nothing: the check here was
+  // hardcoded to 1, so setting a coupon to "usable twice" had no effect at all.
+  //
+  // Read as per-user rather than as a global cap deliberately: the default is 1
+  // and the hardcoded check it replaces was per-user, so every existing coupon
+  // keeps exactly the behaviour it has today, while the two that are configured
+  // for 2 uses start working as configured. A global cap would instead have
+  // retroactively killed every coupon already used once.
+  const perUserLimit = Math.max(1, Number(coupon.maxLimit) || 1);
   const usage = getUserUsage(coupon, userId);
   const usedCount = Number(usage?.count || 0);
-  const alreadyUsedInOrder = await hasUserPlacedOrderWithCoupon({
+  // Cross-checked against real orders as well as the counter, because the counter
+  // is decremented on cancellation while the order history is the durable fact.
+  const ordersWithCoupon = await countOrdersWithCoupon({
     couponId: normalizedCouponId,
     userId,
     session,
   });
-  if (usedCount >= 1 || alreadyUsedInOrder) {
-    throw couponError("You have already used this coupon");
+  if (Math.max(usedCount, ordersWithCoupon) >= perUserLimit) {
+    throw couponError(
+      perUserLimit === 1
+        ? "You have already used this coupon"
+        : `You have already used this coupon the maximum ${perUserLimit} times`,
+    );
   }
 
   const targetType = getCouponTargetType(coupon);
@@ -194,6 +222,6 @@ export const calculateCouponDiscount = async ({
     eligibleQuantity,
     minPurchaseAmount,
     eligibleSubtotal,
-    remainingUses: Math.max(0, 1 - usedCount - (redeem ? 1 : 0)),
+    remainingUses: Math.max(0, perUserLimit - usedCount - (redeem ? 1 : 0)),
   };
 };

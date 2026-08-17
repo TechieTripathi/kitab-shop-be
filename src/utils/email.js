@@ -16,10 +16,27 @@ export const SendEmail = async (email, token) => {
       },
     });
 
-    const resetLink = `${process.env.FRONTEND_URL || "http://localhost:5173"}/reset-password.html?token=${token}`;
+    // "/reset-password", NOT "/reset-password.html". The frontend is a single-page
+    // React app whose route is `/reset-password` (App.jsx) — there is no
+    // reset-password.html anywhere in the project, so every reset email sent so far
+    // led to a 404 and password reset was unusable end to end.
+    //
+    // RESET_PASSWORD_FRONTEND_URL is honoured first because it is already present in
+    // .env and was read by nothing; it lets the landing page be moved without a code
+    // change. Falling back to FRONTEND_URL keeps existing deployments working.
+    // Trailing slashes are stripped from the configured origin BEFORE the path is
+    // appended, so `FRONTEND_URL=https://site/` cannot produce `https://site//reset-password`.
+    const frontendOrigin = String(process.env.FRONTEND_URL || "http://localhost:5173").replace(
+      /\/+$/,
+      "",
+    );
+    const resetBase = String(
+      process.env.RESET_PASSWORD_FRONTEND_URL || `${frontendOrigin}/reset-password`,
+    ).replace(/\/+$/, "");
+    const resetLink = `${resetBase}?token=${encodeURIComponent(token)}`;
 
     await transporter.sendMail({
-      from: `"Astro Wala Shop" <${process.env.EMAIL}>`,
+      from: `"Kitab Shop" <${process.env.EMAIL}>`,
       replyTo: process.env.EMAIL,
       to: email,
       subject: "Reset Your Password",

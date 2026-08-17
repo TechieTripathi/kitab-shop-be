@@ -90,7 +90,7 @@ export const AdminUpdateCmsBlock = async (req, res) => {
     const block = await CmsBlock.findByIdAndUpdate(
       req.params.id,
       { $set: payload },
-      { new: true, runValidators: true },
+      { returnDocument: "after", runValidators: true },
     );
     if (!block) return res.status(404).json({ success: false, message: "CMS block not found" });
 

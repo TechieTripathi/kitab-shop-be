@@ -16,7 +16,13 @@ const couponUsageSchema = new mongoose.Schema(
     count: {
       type: Number,
       default: 1,
-      min: 1,
+      // 0 is a legitimate state: the user redeemed the coupon and then
+      // cancelled the order, so the redemption was given back. `min: 1` made
+      // that decrement throw a ValidationError, which is not a
+      // TransientTransactionError — so withTransaction aborted instead of
+      // retrying and EVERY cancellation of a coupon order failed with a 500.
+      // The entry is kept (rather than pulled) so redemption history survives.
+      min: 0,
     },
     lastUsedAt: {
       type: Date,
@@ -145,7 +151,14 @@ couponSchema.pre("validate", function () {
   if (this.startDate && this.expireDate && this.expireDate < this.startDate) {
     this.invalidate("expireDate", "Expire date must be after start date");
   }
-  this.usage = Array.isArray(this.usedBy) ? this.usedBy.length : this.usage || 0;
+  // Total redemptions = sum of per-user counts, NOT usedBy.length. Using the
+  // array length meant `usage` could only ever grow: a cancelled redemption
+  // decrements a user's count but leaves their entry in place, so the length
+  // never fell and the counter drifted permanently upward. The two definitions
+  // happen to agree only while every user is capped at one use.
+  this.usage = Array.isArray(this.usedBy)
+    ? this.usedBy.reduce((total, entry) => total + (Number(entry?.count) || 0), 0)
+    : this.usage || 0;
 });
 
 couponSchema.index({ isActive: 1, startDate: 1, expireDate: 1 });

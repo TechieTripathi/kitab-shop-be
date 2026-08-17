@@ -55,25 +55,25 @@ const AboutPageSchema = new mongoose.Schema(
     title: {
       type: TextBlockSchema,
       default: () => ({
-        text: "About Astro Wala Shop",
+        text: "About Kitab Shop",
         font: { fontSize: 34, fontWeight: "bold", textColor: "#FFFFFF" },
       }),
     },
     intro: {
       type: TextBlockSchema,
       default: () => ({
-        text: "Astro Wala Shop is India's trusted destination for certified astrology products, spiritual essentials, and reliable customer support.",
+        text: "Kitab Shop is your neighbourhood online bookstore — curated fiction, timeless classics, fresh releases, and reliable customer support.",
         font: { fontSize: 16, fontWeight: "normal", textColor: "#EFF6FF" },
       }),
     },
-    primaryButton: { type: LinkButtonSchema, default: () => ({ text: "Explore Products", link: "/products" }) },
+    primaryButton: { type: LinkButtonSchema, default: () => ({ text: "Explore Books", link: "/products" }) },
     secondaryButton: { type: LinkButtonSchema, default: () => ({ text: "Contact Support", link: "/contact", textColor: "#FFFFFF" }) },
     sections: {
       type: [SectionSchema],
       default: () => [
         {
           heading: "Who we are",
-          body: "Astro Wala Shop brings together certified gemstones, authentic rudraksha, energised yantras, pooja essentials, healing crystals, and astrology guidance on one trusted platform. Our goal is to make spiritual shopping simple, transparent, and dependable for every customer.",
+          body: "Kitab Shop brings together fiction, non-fiction, children's books, academic titles, and every genre in between — sourced directly from verified publishers on one trusted platform. Our goal is to make book shopping simple, transparent, and dependable for every reader.",
         },
         {
           heading: "What we promise",
@@ -84,7 +84,7 @@ const AboutPageSchema = new mongoose.Schema(
     processSteps: {
       type: [SectionSchema],
       default: () => [
-        { heading: "Choose the right category", body: "Explore gemstones, rudraksha, yantras, puja essentials, healing crystals, and astrology items with clear product details." },
+        { heading: "Choose the right genre", body: "Explore fiction, non-fiction, mystery, romance, children's books, and academic titles with clear edition details." },
         { heading: "Check trust details", body: "Review price, size, delivery availability, return eligibility, certification notes, and product highlights before checkout." },
         { heading: "Order with support", body: "After checkout, order status, invoice, returns, refunds, and customer support are available from the account area." },
       ],

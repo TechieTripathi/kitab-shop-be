@@ -1,0 +1,68 @@
+export const categories = [
+  {
+    id: "fiction",
+    name: "Fiction",
+    tagline: "Stories & Novels",
+    icon: "BookOpen",
+    color: "#7B2D6E",
+    image: "https://images.unsplash.com/photo-1481627834876-b7833e8f5570?auto=format&fit=crop&fm=webp&w=200&q=80",
+  },
+  {
+    id: "non-fiction",
+    name: "Non-Fiction",
+    tagline: "Real Stories & Ideas",
+    icon: "BookMarked",
+    color: "#5C4326",
+    image: "https://images.unsplash.com/photo-1512820790803-83ca734da794?auto=format&fit=crop&fm=webp&w=200&q=80",
+  },
+  {
+    id: "mystery-thriller",
+    name: "Mystery & Thriller",
+    tagline: "Edge-of-the-Seat Reads",
+    icon: "Search",
+    color: "#A8782E",
+    image: "https://images.unsplash.com/photo-1495446815901-a7297e633e8d?auto=format&fit=crop&fm=webp&w=200&q=80",
+  },
+  {
+    id: "romance",
+    name: "Romance",
+    tagline: "Love & Relationships",
+    icon: "Heart",
+    color: "#8C3B1E",
+    image: "https://images.unsplash.com/photo-1516979187457-637abb4f9353?auto=format&fit=crop&fm=webp&w=200&q=80",
+  },
+  {
+    id: "sci-fi-fantasy",
+    name: "Science Fiction & Fantasy",
+    tagline: "Worlds Beyond",
+    icon: "Rocket",
+    color: "#3B5C8C",
+    image: "https://images.unsplash.com/photo-1524995997946-a1c2e315a42f?auto=format&fit=crop&fm=webp&w=200&q=80",
+  },
+  {
+    id: "biography-history",
+    name: "Biography & History",
+    tagline: "Lives & Events",
+    icon: "Landmark",
+    color: "#2E6B5C",
+    image: "https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?auto=format&fit=crop&fm=webp&w=200&q=80",
+  },
+  {
+    id: "children",
+    name: "Children",
+    tagline: "Picture Books & Early Readers",
+    icon: "Baby",
+    color: "#1A4B8C",
+    image: "https://images.unsplash.com/photo-1553729459-efe14ef6055d?auto=format&fit=crop&fm=webp&w=200&q=80",
+  },
+  {
+    id: "academic",
+    name: "Academic",
+    tagline: "Textbooks & Reference",
+    icon: "GraduationCap",
+    color: "#6B1E3C",
+    image: "https://images.unsplash.com/photo-1543002588-bfa74002ed7e?auto=format&fit=crop&fm=webp&w=200&q=80",
+  },
+];
+
+export const getCategoryById = (id) => categories.find((c) => c.id === id);

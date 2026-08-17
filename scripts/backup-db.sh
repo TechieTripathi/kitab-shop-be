@@ -28,18 +28,32 @@ if ! command -v mongodump >/dev/null 2>&1; then
   exit 1
 fi
 
-# Pull mango_url out of .env without sourcing the file, so quoting styles and
-# other entries in .env cannot execute anything.
+# Pull the connection string out of .env without sourcing the file, so quoting styles
+# and other entries in .env cannot execute anything.
+#
+# BOTH spellings, in the same precedence the app uses (src/database/mongo.db.js reads
+# `mango_url || mongo_url`). This script used to read `mango_url` only: on a deployment
+# whose .env says `mongo_url` it captured an empty string and, under `set -e`, exited 1
+# with NO output at all. A backup that reports nothing and writes nothing is worse than
+# one that fails loudly, because it looks like it worked.
 if [[ -z "${MONGO_URL:-}" ]]; then
   if [[ ! -f "${APP_DIR}/.env" ]]; then
     echo "error: no MONGO_URL set and ${APP_DIR}/.env not found" >&2
     exit 1
   fi
-  MONGO_URL="$(
-    grep -E '^[[:space:]]*mango_url[[:space:]]*=' "${APP_DIR}/.env" \
-      | tail -n 1 \
-      | sed -E 's/^[[:space:]]*mango_url[[:space:]]*=[[:space:]]*//; s/^["'"'"']//; s/["'"'"']$//'
-  )"
+  for KEY in mango_url mongo_url MONGO_URL; do
+    # `|| true` is load-bearing: with `set -o pipefail`, grep exiting 1 because a key is
+    # ABSENT fails the whole command substitution, and `set -e` then kills the script — no
+    # message, no archive, exit 1. That is exactly how this silently never backed anything
+    # up. A missing key has to be an empty result, not a fatal error, because trying the
+    # next spelling is the entire point of the loop.
+    MONGO_URL="$(
+      { grep -E "^[[:space:]]*${KEY}[[:space:]]*=" "${APP_DIR}/.env" || true; } \
+        | tail -n 1 \
+        | sed -E "s/^[[:space:]]*${KEY}[[:space:]]*=[[:space:]]*//; s/^[\"']//; s/[\"']$//"
+    )"
+    [[ -n "${MONGO_URL}" ]] && break
+  done
 fi
 
 if [[ -z "${MONGO_URL}" ]]; then

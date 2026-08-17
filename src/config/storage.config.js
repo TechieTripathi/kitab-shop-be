@@ -21,18 +21,24 @@ export const uploadsPublicPath = "/uploads";
 // Every asset type gets its own subfolder. Keys are the folder names callers
 // pass to saveImageAsset; the historical Cloudinary names are accepted too so
 // that a caller missed during the migration still lands somewhere sensible.
+// The astro-* aliases predate the bookstore conversion and stay for
+// back-compat with any stored URLs; book-* are the current-era equivalents.
 const FOLDER_ALIASES = {
   products: "products",
   "astro-products": "products",
   "astro-products-image": "products",
+  "book-products": "products",
   categories: "categories",
   "astro-categories": "categories",
+  "book-categories": "categories",
   banners: "banners",
   "astro-banners": "banners",
+  "book-banners": "banners",
   reviews: "reviews",
   "astro-reviews": "reviews",
   profiles: "profiles",
   "astro-profiles": "profiles",
+  static: "static",
 };
 
 export const IMAGE_FOLDERS = [...new Set(Object.values(FOLDER_ALIASES))];

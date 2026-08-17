@@ -5,8 +5,15 @@ dotenv.config();
 
 export const SendVerficationEmail = async (email, token, otp) => {
   try {
-    // Frontend URL
-    const verificationLink = `${process.env.FRONTEND_URL}/verify-email?token=${token}`;
+    // Same normalisation as the password-reset link: a trailing slash on
+    // FRONTEND_URL must not produce `https://site//verify-email`, and an unset
+    // FRONTEND_URL must not send customers to `undefined/verify-email` — this had
+    // no fallback at all, so a missing env var silently emailed a broken link.
+    const frontendOrigin = String(process.env.FRONTEND_URL || "http://localhost:5173").replace(
+      /\/+$/,
+      "",
+    );
+    const verificationLink = `${frontendOrigin}/verify-email?token=${encodeURIComponent(token)}`;
 
     // Create HTML template directly to avoid Vercel filesystem issues
     const html = `<!doctype html>
@@ -87,7 +94,7 @@ export const SendVerficationEmail = async (email, token, otp) => {
 
     // Send mail
     await transporter.sendMail({
-      from: `"Internship" <${process.env.EMAIL}>`,
+      from: `"Kitab Shop" <${process.env.EMAIL}>`,
       to: email,
       subject: "Verify Your Email",
       html,
@@ -95,9 +102,13 @@ export const SendVerficationEmail = async (email, token, otp) => {
 
     console.log("✅ Email sent successfully");
     console.log(verificationLink);
-    console.log(html);
   } catch (err) {
     console.log(err);
+    // Rethrown so callers can tell the user the mail did NOT go out. This
+    // used to be swallowed: signup answered "please verify your email" while
+    // no email existed, and the account was permanently locked out of login
+    // ("User not verified") with no hint why.
+    throw new Error("VERIFICATION_EMAIL_SEND_FAILED");
   }
 };
 
