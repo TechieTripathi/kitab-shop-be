@@ -12,14 +12,9 @@ const maskEmail = (email = "") => {
     : "";
 };
 
-
-let EMAIL="info.kitabshop@gmail.com"
-let EMAIL_PASSWORD="sbys rpli asfj nctw"
-
-
 const recipient = String(process.argv[2] || DEFAULT_TEST_RECIPIENT).trim();
-const sender = String(EMAIL || "").trim();
-const password = String(EMAIL_PASSWORD || "");
+const sender = String(process.env.EMAIL || "").trim();
+const password = String(process.env.EMAIL_PASSWORD || "");
 const sentAt = new Date().toISOString();
 const subject = `Kitab Shop SMTP diagnostic test - ${sentAt}`;
 
