@@ -86,9 +86,7 @@ backups/
 # Uploaded files are runtime data. Back these up separately from mongodump.
 # uploads/static is generated once by scripts/fetch-static-images.js and is
 # committed because deployed servers need placeholders/default assets at boot.
-uploads/*
-!uploads/static/
-!uploads/static/**
+
 
 # parcel-bundler cache (https://parceljs.org/)
 .cache
