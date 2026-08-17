@@ -156,6 +156,13 @@ app.get("/", (req, res) => {
 	});
 });
 
+app.get("/health", (req, res) => {
+	res.status(200).json({
+		status: "ok",
+		service: "Kitab Shop API",
+	});
+});
+
 app.use("/api/v1/auth", auth);
 
 app.use("/api/v1/user/profile", userProfileRoutes);
@@ -201,8 +208,10 @@ app.use((err, req, res, next) => {
 	return res.status(500).json({ message: "Internal server error" });
 });
 
-app.listen(process.env.port || 3000, () =>
-	console.log(`Server is running on port ${process.env.port || 3000}`)
+const port = process.env.PORT || process.env.port || 3000;
+
+app.listen(port, () =>
+	console.log(`Server is running on port ${port}`)
 );
 
 export default app;
